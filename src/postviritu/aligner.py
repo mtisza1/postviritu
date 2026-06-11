@@ -127,6 +127,8 @@ class Mmseqs2Aligner(Aligner):
             str(self.sensitivity),
             "--max-seqs",
             str(self.max_seqs),
+            "--search-type",
+            "3",
             "--format-output",
             ",".join(self._FORMAT_FIELDS),
             *self.extra_args,
