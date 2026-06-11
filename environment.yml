@@ -1,0 +1,16 @@
+name: postviritu
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.10
+  - polars>=1.0
+  - pyyaml>=6.0
+  - pandas>=1.0
+  - mmseqs2>=15
+  - taxonkit>=0.15
+  - pytaxonkit>=0.10
+  - numpy
+  - pip
+  - pip:
+      - -e .

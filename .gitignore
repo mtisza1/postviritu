@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / tooling caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+
+# project
+example_data/
+sandbox/
