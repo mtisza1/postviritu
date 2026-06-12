@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import polars as pl
 
@@ -59,11 +59,22 @@ class Aligner(ABC):
         query_fasta: str,
         threads: int = 1,
         exclude_taxids: Optional[List[str]] = None,
+        tmp_dir: Optional[str] = None,
+        keep: bool = False,
+        result_name: str = "result.m8",
+        query_nonN_len: Optional[Dict[str, int]] = None,
     ) -> pl.DataFrame:
         """Align ``query_fasta`` against the backend's DB.
 
         ``exclude_taxids`` optionally removes the given taxids (and descendants)
         from the searchable database, used for the second-round tie check.
+        ``tmp_dir`` is the working directory for intermediate files (created if
+        needed); when ``None`` a system temp directory is used. ``keep``
+        preserves the tabular alignment output (named ``result_name``) under
+        ``tmp_dir`` for later inspection instead of deleting it.
+        ``query_nonN_len`` maps each query Accession to its non-N residue count;
+        when provided, ``pct_identity`` and ``query_coverage`` are recomputed to
+        exclude N positions (see :func:`parse_m8`).
         Returns a polars DataFrame with :data:`HIT_COLUMNS`.
         """
         raise NotImplementedError
@@ -73,6 +84,8 @@ class Mmseqs2Aligner(Aligner):
     """mmseqs2 ``easy-search`` backend against a taxonomy-aware target DB."""
 
     # mmseqs format-output field order (must match parsing below).
+    # ``qaln``/``taln`` (gapped aligned sequences) are emitted so identity and
+    # coverage can be recomputed excluding N positions on both query and target.
     _FORMAT_FIELDS = [
         "query",
         "target",
@@ -83,6 +96,8 @@ class Mmseqs2Aligner(Aligner):
         "qcov",
         "evalue",
         "bits",
+        "qaln",
+        "taln",
     ]
 
     def __init__(
@@ -104,14 +119,22 @@ class Mmseqs2Aligner(Aligner):
         query_fasta: str,
         threads: int = 1,
         exclude_taxids: Optional[List[str]] = None,
+        tmp_dir: Optional[str] = None,
+        keep: bool = False,
+        result_name: str = "result.m8",
+        query_nonN_len: Optional[Dict[str, int]] = None,
     ) -> pl.DataFrame:
         if shutil.which(self.mmseqs_bin) is None:
             raise RuntimeError(
                 f"'{self.mmseqs_bin}' not found on PATH. Install mmseqs2 "
                 "(e.g. `conda install -c bioconda mmseqs2`)."
             )
-        tmp_root = tempfile.mkdtemp(prefix="postviritu_mmseqs_")
-        result_m8 = os.path.join(tmp_root, "result.m8")
+        if tmp_dir is None:
+            tmp_root = tempfile.mkdtemp(prefix="postviritu_mmseqs_")
+        else:
+            tmp_root = tmp_dir
+            os.makedirs(tmp_root, exist_ok=True)
+        result_m8 = os.path.join(tmp_root, result_name)
         mmseqs_tmp = os.path.join(tmp_root, "tmp")
         os.makedirs(mmseqs_tmp, exist_ok=True)
         cmd = [
@@ -139,17 +162,34 @@ class Mmseqs2Aligner(Aligner):
             cmd += ["--taxon-list", taxon_list]
         try:
             subprocess.run(cmd, check=True)
-            return parse_m8(result_m8, self._FORMAT_FIELDS)
+            return parse_m8(result_m8, self._FORMAT_FIELDS, query_nonN_len)
         finally:
-            shutil.rmtree(tmp_root, ignore_errors=True)
+            if keep:
+                # Preserve the tabular alignment output; drop only the
+                # mmseqs2 internal working directory.
+                shutil.rmtree(mmseqs_tmp, ignore_errors=True)
+            else:
+                shutil.rmtree(tmp_root, ignore_errors=True)
 
 
-def parse_m8(path: str, fields: List[str]) -> pl.DataFrame:
+def parse_m8(
+    path: str,
+    fields: List[str],
+    query_nonN_len: Optional[Dict[str, int]] = None,
+) -> pl.DataFrame:
     """Parse an mmseqs/BLAST tabular output into the canonical hit schema.
 
     ``fields`` lists the column names as emitted, using mmseqs field names
     (``fident``, ``qcov``, ``bits`` ...). The query is normalised so a
     ``_consensus`` suffix is stripped to recover the EsViritu Accession.
+
+    When the gapped aligned sequences (``qaln``/``taln``) are present,
+    ``pct_identity`` and ``query_coverage`` are recomputed to exclude N
+    positions: identity is matching residues over alignment columns where
+    neither query nor target is N (or a gap), and coverage is the count of
+    aligned non-N query residues over ``query_nonN_len`` (the query's total
+    non-N residue count). Columns left untouched fall back to the values mmseqs
+    reported.
     """
     if not os.path.isfile(path) or os.path.getsize(path) == 0:
         return empty_hits()
@@ -177,12 +217,71 @@ def parse_m8(path: str, fields: List[str]) -> pl.DataFrame:
         pl.col("query").str.replace(r"_consensus$", "").alias("query")
     )
 
+    # Recompute identity/coverage excluding N positions when the aligned
+    # sequences are available (query name must already be the Accession so it
+    # matches the keys of ``query_nonN_len``).
+    if "qaln" in raw.columns and "taln" in raw.columns:
+        raw = _recompute_nonN_metrics(raw, query_nonN_len)
+
     # Ensure all canonical columns exist (fill missing with nulls).
     for col, dtype in HIT_SCHEMA.items():
         if col not in raw.columns:
             raw = raw.with_columns(pl.lit(None).cast(dtype).alias(col))
 
     return raw.select(HIT_COLUMNS).cast(HIT_SCHEMA, strict=False)
+
+
+def _recompute_nonN_metrics(
+    raw: pl.DataFrame, query_nonN_len: Optional[Dict[str, int]]
+) -> pl.DataFrame:
+    """Recompute ``pct_identity`` and ``query_coverage`` excluding N positions.
+
+    Identity is computed over alignment columns where neither the query nor
+    target residue is a gap or N. Coverage is the number of aligned non-N query
+    residues divided by the query's total non-N residue count
+    (``query_nonN_len``); when that count is unavailable for a query, the
+    mmseqs-reported coverage is kept.
+    """
+    query_nonN_len = query_nonN_len or {}
+    qalns = raw["qaln"].to_list()
+    talns = raw["taln"].to_list()
+    queries = raw["query"].to_list()
+    orig_cov = (
+        raw["query_coverage"].to_list()
+        if "query_coverage" in raw.columns
+        else [None] * len(queries)
+    )
+
+    new_pid: List[float] = []
+    new_cov: List[Optional[float]] = []
+    for qaln, taln, query, ocov in zip(qalns, talns, queries, orig_cov):
+        matches = 0
+        id_denom = 0
+        aligned_nonN_query = 0
+        if qaln and taln:
+            for cq, ct in zip(qaln, taln):
+                if cq == "-":
+                    continue
+                cq_u = cq.upper()
+                q_is_n = cq_u == "N"
+                if not q_is_n:
+                    aligned_nonN_query += 1
+                if ct == "-" or q_is_n or ct.upper() == "N":
+                    continue
+                id_denom += 1
+                if cq_u == ct.upper():
+                    matches += 1
+        new_pid.append(matches / id_denom if id_denom else 0.0)
+        total = query_nonN_len.get(query)
+        if total:
+            new_cov.append(aligned_nonN_query / total)
+        else:
+            new_cov.append(ocov)
+
+    return raw.with_columns(
+        pl.Series("pct_identity", new_pid, dtype=pl.Float64),
+        pl.Series("query_coverage", new_cov, dtype=pl.Float64),
+    )
 
 
 def filter_hits(

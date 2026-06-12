@@ -31,6 +31,8 @@ class RunConfig:
     bitscore_tie_frac: float = 0.99
     threads: int = 1
     realign_ties: bool = False
+    tmp_dir: Optional[str] = None
+    keep_alignments: bool = False
 
 
 def run_sample(
@@ -51,8 +53,20 @@ def run_sample(
     params = load_params(sample.params)
     spthresh, subspthresh = get_thresholds(params)
     consensus_seqs = parse_consensus_fasta(sample.consensus)
+    query_nonN_len = {
+        acc: sum(1 for base in seq if base not in "Nn")
+        for acc, seq in consensus_seqs.items()
+    }
 
-    hits = aligner.search(sample.consensus, threads=config.threads)
+    tmp_dir = config.tmp_dir or os.path.join(outdir, f"{sample.prefix}_tmp")
+    hits = aligner.search(
+        sample.consensus,
+        threads=config.threads,
+        tmp_dir=tmp_dir,
+        keep=config.keep_alignments,
+        result_name=f"{sample.prefix}_alignment.m8",
+        query_nonN_len=query_nonN_len,
+    )
     hits = filter_hits(
         hits,
         min_identity=config.min_identity,

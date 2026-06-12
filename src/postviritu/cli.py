@@ -68,6 +68,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--threads", type=int, default=1)
     p_run.add_argument("--mmseqs-bin", default="mmseqs")
     p_run.add_argument(
+        "--tmp-dir",
+        default=None,
+        help="Working directory for alignment intermediates "
+        "(default: {outdir}/{prefix}_tmp).",
+    )
+    p_run.add_argument(
+        "--keep-alignments",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep the tabular alignment output files for inspection "
+        "(default: on; use --no-keep-alignments to delete them after each sample).",
+    )
+    p_run.add_argument(
         "--taxdump",
         default=None,
         help="NCBI taxdump dir for pytaxonkit (default: from DB manifest, "
@@ -114,6 +127,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         bitscore_tie_frac=args.bitscore_tie_frac,
         threads=args.threads,
         realign_ties=args.realign_ties,
+        tmp_dir=args.tmp_dir,
+        keep_alignments=args.keep_alignments,
     )
     processed = run_batch(
         input_dir=args.input_dir,

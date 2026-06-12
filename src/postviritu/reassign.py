@@ -296,8 +296,15 @@ def _second_round_tie_check(
     try:
         fasta_path = os.path.join(tmp_dir, "subset.fasta")
         write_fasta(subset, fasta_path)
+        query_nonN_len = {
+            acc: sum(1 for base in seq if base not in "Nn")
+            for acc, seq in subset.items()
+        }
         round2 = aligner.search(
-            fasta_path, threads=threads, exclude_taxids=[round1_taxid]
+            fasta_path,
+            threads=threads,
+            exclude_taxids=[round1_taxid],
+            query_nonN_len=query_nonN_len,
         )
         if round2.is_empty():
             return None

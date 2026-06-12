@@ -55,7 +55,16 @@ class FakeAligner:
         self._hits = hits
         self._second_round = second_round if second_round is not None else _empty()
 
-    def search(self, query_fasta, threads=1, exclude_taxids=None):
+    def search(
+        self,
+        query_fasta,
+        threads=1,
+        exclude_taxids=None,
+        tmp_dir=None,
+        keep=False,
+        result_name="result.m8",
+        query_nonN_len=None,
+    ):
         if exclude_taxids:
             return self._second_round
         return self._hits
