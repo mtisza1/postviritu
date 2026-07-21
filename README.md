@@ -69,6 +69,25 @@ postviritu run \
   --sample_id AYWM5R.p2126
 ```
 
+### Run with BLASTN -remote (no local DB)
+
+You can also search NCBI's `nt` database remotely with `blastn` instead of
+building a local mmseqs2 database. The input and output formats are identical
+to `postviritu run`; only the search backend changes.
+
+```bash
+postviritu blastn \
+  --input-dir /path/to/esviritu_output \
+  --outdir /path/to/postviritu_output \
+  --taxdump /path/to/ncbi_taxdump_dir \
+  --threads 1
+```
+
+Remote searches are sent in batches of up to **3 query sequences at a time**
+and each batch is awaited before the next is submitted. Use `--batch-size`
+to change this default and `--max-target-seqs` to control how many subject
+hits are reported per query.
+
 ### Reassignment modes
 
 - `--mode scratch` (default): re-derive every assembly's taxonomy purely from
@@ -105,6 +124,6 @@ Provenance columns include `esviritu_species`, `esviritu_subspecies`,
 
 ## Status / out of scope
 
-The initial version implements the `mmseqs2` backend (a pluggable interface
-allows a future BLASTN backend), and does not regenerate HTML reports or
-re-map reads.
+The package implements both the `mmseqs2` and `blastn -remote` backends via a
+pluggable aligner interface, and does not regenerate HTML reports or re-map
+reads.

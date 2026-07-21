@@ -3,6 +3,7 @@
 Subcommands:
   setup-db   build the mmseqs2 target DB + taxonomy (run once)
   run        re-align EsViritu consensus genomes and rewrite outputs
+  blastn     re-align using NCBI BLASTN -remote against nt
 """
 
 from __future__ import annotations
@@ -88,6 +89,72 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_run.set_defaults(func=_cmd_run)
 
+    # blastn
+    p_blastn = sub.add_parser(
+        "blastn",
+        help="Re-align consensus genomes using NCBI BLASTN -remote against nt.",
+    )
+    p_blastn.add_argument(
+        "--input-dir", required=True, help="Directory of EsViritu outputs."
+    )
+    p_blastn.add_argument(
+        "--outdir", required=True, help="Output directory."
+    )
+    p_blastn.add_argument(
+        "--sample_id", default=None, help="Process only this sample prefix (default: all)."
+    )
+    p_blastn.add_argument(
+        "--mode",
+        choices=["scratch", "disagree"],
+        default="scratch",
+        help="Reassignment mode (default: scratch).",
+    )
+    p_blastn.add_argument("--min-identity", type=float, default=0.9)
+    p_blastn.add_argument("--min-aln-fraction", type=float, default=0.5)
+    p_blastn.add_argument("--max-evalue", type=float, default=1e-10)
+    p_blastn.add_argument("--bitscore-tie-frac", type=float, default=0.99)
+    p_blastn.add_argument(
+        "--realign-ties",
+        action="store_true",
+        help="(disagree mode) second-round re-align excluding the round-1 taxid.",
+    )
+    p_blastn.add_argument("--threads", type=int, default=1)
+    p_blastn.add_argument("--blastn-bin", default="blastn")
+    p_blastn.add_argument(
+        "--db", default="nt", help="NCBI database name (default: nt)."
+    )
+    p_blastn.add_argument(
+        "--taxdump",
+        default=None,
+        help="NCBI taxdump dir for pytaxonkit (default: taxonkit's ~/.taxonkit).",
+    )
+    p_blastn.add_argument(
+        "--tmp-dir",
+        default=None,
+        help="Working directory for alignment intermediates "
+        "(default: {outdir}/{prefix}_tmp).",
+    )
+    p_blastn.add_argument(
+        "--keep-alignments",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep the tabular alignment output files for inspection "
+        "(default: on; use --no-keep-alignments to delete them after each sample).",
+    )
+    p_blastn.add_argument(
+        "--batch-size",
+        type=int,
+        default=3,
+        help="Number of query sequences per remote BLASTN call (default: 3).",
+    )
+    p_blastn.add_argument(
+        "--max-target-seqs",
+        type=int,
+        default=300,
+        help="Maximum target sequences reported per query (default: 300).",
+    )
+    p_blastn.set_defaults(func=_cmd_blastn)
+
     return parser
 
 
@@ -119,6 +186,41 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     aligner = Mmseqs2Aligner(target_db=target_db, mmseqs_bin=args.mmseqs_bin)
     taxonomy = Taxonomy(data_dir=taxdump, threads=args.threads)
+    config = RunConfig(
+        mode=args.mode,
+        min_identity=args.min_identity,
+        min_aln_fraction=args.min_aln_fraction,
+        max_evalue=args.max_evalue,
+        bitscore_tie_frac=args.bitscore_tie_frac,
+        threads=args.threads,
+        realign_ties=args.realign_ties,
+        tmp_dir=args.tmp_dir,
+        keep_alignments=args.keep_alignments,
+    )
+    processed = run_batch(
+        input_dir=args.input_dir,
+        aligner=aligner,
+        taxonomy=taxonomy,
+        outdir=args.outdir,
+        config=config,
+        sample_id=args.sample_id,
+    )
+    print(f"[postviritu] processed {len(processed)} sample(s): {', '.join(processed)}")
+    return 0
+
+
+def _cmd_blastn(args: argparse.Namespace) -> int:
+    from .aligner import BlastnAligner
+    from .run import RunConfig, run_batch
+    from .taxonomy import Taxonomy
+
+    aligner = BlastnAligner(
+        db=args.db,
+        blastn_bin=args.blastn_bin,
+        max_target_seqs=args.max_target_seqs,
+        batch_size=args.batch_size,
+    )
+    taxonomy = Taxonomy(data_dir=args.taxdump, threads=args.threads)
     config = RunConfig(
         mode=args.mode,
         min_identity=args.min_identity,
