@@ -8,6 +8,7 @@ dependencies:
   - pyyaml>=6.0
   - pandas>=1.0
   - mmseqs2>=15
+  - blast
   - taxonkit>=0.15
   - pytaxonkit>=0.10
   - numpy

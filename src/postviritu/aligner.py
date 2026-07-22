@@ -14,9 +14,11 @@ import shutil
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import polars as pl
+
+from .io_esviritu import parse_consensus_fasta, write_fasta
 
 # Columns every aligner must return. ``query`` is the EsViritu Accession,
 # ``target`` is the DB sequence id, ``taxid`` is the NCBI taxid of the target.
@@ -177,7 +179,7 @@ def parse_m8(
     fields: List[str],
     query_nonN_len: Optional[Dict[str, int]] = None,
 ) -> pl.DataFrame:
-    """Parse an mmseqs/BLAST tabular output into the canonical hit schema.
+    """Parse a mmseqs2 tabular output into the canonical hit schema.
 
     ``fields`` lists the column names as emitted, using mmseqs field names
     (``fident``, ``qcov``, ``bits`` ...). The query is normalised so a
@@ -282,6 +284,192 @@ def _recompute_nonN_metrics(
         pl.Series("pct_identity", new_pid, dtype=pl.Float64),
         pl.Series("query_coverage", new_cov, dtype=pl.Float64),
     )
+
+
+def _chunked(items: List[Tuple[str, str]], n: int) -> Iterable[List[Tuple[str, str]]]:
+    """Yield successive chunks of size ``n`` from ``items``."""
+    for i in range(0, len(items), n):
+        yield items[i : i + n]
+
+
+def parse_blastn(
+    path: str,
+    fields: List[str],
+    query_nonN_len: Optional[Dict[str, int]] = None,
+) -> pl.DataFrame:
+    """Parse a BLASTN tabular output (``-outfmt 6``) into the canonical hit schema.
+
+    ``fields`` lists the column names as emitted by BLASTN. Percentages
+    (``pident``, ``qcovs``) are converted to fractions, ``staxids`` is reduced
+    to the first taxid, and the EsViritu ``_consensus`` suffix is stripped from
+    the query name. When gapped aligned sequences (``qseq``/``sseq``) are
+    present, identity and coverage are recomputed to exclude N positions, just
+    as for the mmseqs2 backend.
+    """
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return empty_hits()
+
+    raw = pl.read_csv(
+        path,
+        separator="\t",
+        has_header=False,
+        new_columns=fields,
+        infer_schema_length=10000,
+        schema_overrides={"staxids": pl.Utf8},
+    )
+
+    rename = {
+        "qseqid": "query",
+        "sseqid": "target",
+        "staxids": "taxid_raw",
+        "length": "aln_length",
+        "qlen": "query_length",
+        "qseq": "qaln",
+        "sseq": "taln",
+    }
+    raw = raw.rename({k: v for k, v in rename.items() if k in raw.columns})
+
+    # BLASTN reports percentages; downstream expects fractions.
+    if "pident" in raw.columns:
+        raw = raw.with_columns((pl.col("pident") / 100.0).alias("pct_identity"))
+    if "qcovs" in raw.columns:
+        raw = raw.with_columns((pl.col("qcovs") / 100.0).alias("query_coverage"))
+
+    # ``staxids`` may contain multiple semicolon-separated taxids.
+    if "taxid_raw" in raw.columns:
+        raw = raw.with_columns(
+            pl.col("taxid_raw").str.extract(r"^(\d+)").alias("taxid")
+        )
+
+    # Strip the EsViritu consensus suffix from the query name.
+    raw = raw.with_columns(
+        pl.col("query").str.replace(r"_consensus$", "").alias("query")
+    )
+
+    # Recompute identity/coverage excluding N positions when the aligned
+    # sequences are available.
+    if "qaln" in raw.columns and "taln" in raw.columns:
+        raw = _recompute_nonN_metrics(raw, query_nonN_len)
+
+    # Ensure all canonical columns exist (fill missing with nulls).
+    for col, dtype in HIT_SCHEMA.items():
+        if col not in raw.columns:
+            raw = raw.with_columns(pl.lit(None).cast(dtype).alias(col))
+
+    return raw.select(HIT_COLUMNS).cast(HIT_SCHEMA, strict=False)
+
+
+class BlastnAligner(Aligner):
+    """NCBI BLASTN ``-remote`` backend against the ``nt`` database."""
+
+    # BLASTN -outfmt 6 field order (must match parsing above).
+    _FORMAT_FIELDS = [
+        "qseqid",
+        "sseqid",
+        "staxids",
+        "pident",
+        "length",
+        "qlen",
+        "qcovs",
+        "evalue",
+        "bitscore",
+        "qseq",
+        "sseq",
+    ]
+
+    def __init__(
+        self,
+        db: str = "nt",
+        blastn_bin: str = "blastn",
+        max_target_seqs: int = 300,
+        batch_size: int = 3,
+        extra_args: Optional[List[str]] = None,
+    ):
+        self.db = db
+        self.blastn_bin = blastn_bin
+        self.max_target_seqs = max_target_seqs
+        self.batch_size = batch_size
+        self.extra_args = extra_args or []
+
+    def search(
+        self,
+        query_fasta: str,
+        threads: int = 1,
+        exclude_taxids: Optional[List[str]] = None,
+        tmp_dir: Optional[str] = None,
+        keep: bool = False,
+        result_name: str = "result.m8",
+        query_nonN_len: Optional[Dict[str, int]] = None,
+    ) -> pl.DataFrame:
+        if shutil.which(self.blastn_bin) is None:
+            raise RuntimeError(
+                f"'{self.blastn_bin}' not found on PATH. Install BLAST+ "
+                "(e.g. `conda install -c bioconda blast`)."
+            )
+
+        if tmp_dir is None:
+            tmp_root = tempfile.mkdtemp(prefix="postviritu_blastn_")
+        else:
+            tmp_root = tmp_dir
+            os.makedirs(tmp_root, exist_ok=True)
+
+        result_path = os.path.join(tmp_root, result_name)
+        batch_out_paths: List[str] = []
+
+        try:
+            records = list(parse_consensus_fasta(query_fasta).items())
+            if not records:
+                return empty_hits()
+
+            for i, batch in enumerate(_chunked(records, self.batch_size)):
+                batch_fasta = os.path.join(tmp_root, f"batch_{i}.fasta")
+                batch_out = os.path.join(tmp_root, f"batch_{i}.tsv")
+                write_fasta(dict(batch), batch_fasta)
+
+                cmd = [
+                    self.blastn_bin,
+                    "-query",
+                    batch_fasta,
+                    "-db",
+                    self.db,
+                    "-remote",
+                    "-outfmt",
+                    f"6 {' '.join(self._FORMAT_FIELDS)}",
+                    "-out",
+                    batch_out,
+                    "-max_target_seqs",
+                    str(self.max_target_seqs),
+                    *self.extra_args,
+                ]
+                subprocess.run(cmd, check=True)
+                batch_out_paths.append(batch_out)
+
+            # Concatenate per-batch tabular outputs into a single result file.
+            with open(result_path, "w") as out_fh:
+                for batch_out in batch_out_paths:
+                    if os.path.isfile(batch_out) and os.path.getsize(batch_out) > 0:
+                        with open(batch_out) as in_fh:
+                            shutil.copyfileobj(in_fh, out_fh)
+
+            hits = parse_blastn(result_path, self._FORMAT_FIELDS, query_nonN_len)
+
+            if exclude_taxids:
+                # BLASTN -remote does not support -negative_taxids, so filter the
+                # tabular results locally (exact taxid match).
+                exclude = [str(t) for t in exclude_taxids]
+                hits = hits.filter(~pl.col("taxid").is_in(exclude))
+
+            return hits
+        finally:
+            if keep:
+                # Keep the final concatenated result; remove per-batch files.
+                for batch_out in batch_out_paths:
+                    batch_fasta = batch_out.replace(".tsv", ".fasta")
+                    for p in [batch_out, batch_fasta]:
+                        if os.path.isfile(p):
+                            os.remove(p)
+            else:
+                shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def filter_hits(
