@@ -107,6 +107,38 @@ hits are reported per query.
 | `--bitscore-tie-frac` | `0.99` | Hits with bitscore ≥ frac × max are "tied" |
 | `--threads` | `1` | Threads for mmseqs2 |
 | `--keep-temp` | off | Keep intermediate files |
+| `--taxa-filter` | off | YAML file of taxa to include (see below) |
+
+### Process only selected taxa
+
+Because `postviritu` is most useful for a subset of predicted taxa, you can
+provide a YAML include-list. Only assemblies whose original EsViritu taxonomy
+matches an entry are re-aligned and reassigned; all others are copied through
+unchanged.
+
+Create a file such as `taxa_to_process.yaml`:
+
+```yaml
+species:
+  - "s__betacoronavirus pandemicum"
+  - "s__Human mastadenovirus A"
+genus:
+  - "g__Enterovirus"
+```
+
+Then pass it to `run` or `blastn`:
+
+```bash
+postviritu run \
+  --input-dir /path/to/esviritu_output \
+  --db /path/to/postviritu_db \
+  --outdir /path/to/postviritu_output \
+  --taxa-filter taxa_to_process.yaml
+```
+
+Rank keys may be any of `kingdom`, `phylum`, `class` (or `tclass`), `order`,
+`family`, `genus`, `species`, or `subspecies`. Values may be given with or
+without the EsViritu rank prefix (`s__...`).
 
 ## Outputs
 

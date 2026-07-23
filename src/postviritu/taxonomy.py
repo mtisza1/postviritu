@@ -15,7 +15,8 @@ pandas DataFrames.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence
+import yaml
+from typing import Dict, List, Optional, Sequence
 
 from .io_esviritu import RANK_PREFIXES, TAX_RANKS
 
@@ -167,3 +168,58 @@ class Taxonomy:
         if not result or int(result) == 0:
             return None
         return str(result)
+
+
+class TaxaFilter:
+    """Include-list filter for query assemblies based on original EsViritu taxonomy.
+
+    The YAML file maps rank names (``species``, ``genus``, etc.) to lists of
+    taxon strings. Values may be given with or without the EsViritu rank
+    prefix (``s__Human mastadenovirus A`` or ``Human mastadenovirus A``);
+    missing prefixes are added automatically from the rank key. An assembly is
+    included if any of its original lineage ranks matches the include list.
+    """
+
+    def __init__(self, include: Optional[Dict[str, List[str]]] = None) -> None:
+        self.include: Dict[str, set[str]] = {}
+        if not include:
+            return
+        for rank, values in include.items():
+            rank_key = self._canonical_rank(rank)
+            if rank_key not in TAX_RANKS:
+                raise ValueError(
+                    f"Unknown taxonomy rank '{rank}'. "
+                    f"Use one of: {', '.join(TAX_RANKS)} (or 'class' for tclass)."
+                )
+            if values is None:
+                continue
+            if isinstance(values, str):
+                values = [values]
+            prefix = RANK_PREFIXES[rank_key]
+            self.include[rank_key] = {
+                v if v.startswith(prefix) else prefix + v for v in values
+            }
+
+    @staticmethod
+    def _canonical_rank(rank: str) -> str:
+        """Map common rank aliases to the internal rank names."""
+        if rank == "class":
+            return "tclass"
+        return rank
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "TaxaFilter":
+        with open(path) as fh:
+            data = yaml.safe_load(fh)
+        if data is None:
+            data = {}
+        return cls(data)
+
+    def matches(self, lineage: Dict[str, str]) -> bool:
+        """Return True if ``lineage`` matches the include list."""
+        if not self.include:
+            return True
+        for rank, values in self.include.items():
+            if lineage.get(rank) in values:
+                return True
+        return False
