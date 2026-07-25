@@ -197,7 +197,7 @@ class TaxaFilter:
                 values = [values]
             prefix = RANK_PREFIXES[rank_key]
             self.include[rank_key] = {
-                v if v.startswith(prefix) else prefix + v for v in values
+                self._normalize(v, prefix) for v in values
             }
 
     @staticmethod
@@ -206,6 +206,14 @@ class TaxaFilter:
         if rank == "class":
             return "tclass"
         return rank
+
+    @staticmethod
+    def _normalize(value: str, prefix: str) -> str:
+        """Add the rank prefix (if absent) and lowercase for case-insensitive matching."""
+        value = value.strip()
+        if not value.lower().startswith(prefix.lower()):
+            value = prefix + value
+        return value.lower()
 
     @classmethod
     def from_yaml(cls, path: str) -> "TaxaFilter":
@@ -220,6 +228,7 @@ class TaxaFilter:
         if not self.include:
             return True
         for rank, values in self.include.items():
-            if lineage.get(rank) in values:
+            value = lineage.get(rank)
+            if value is not None and self._normalize(value, RANK_PREFIXES[rank]) in values:
                 return True
         return False

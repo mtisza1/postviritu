@@ -63,6 +63,15 @@ def test_taxa_filter_matches_with_and_without_prefix():
     assert not tf.matches({"species": "s__OtherSp"})
 
 
+def test_taxa_filter_matches_case_insensitive():
+    tf = TaxaFilter({"species": ["s__keepsp"]})
+    assert tf.matches({"species": "s__KeepSp"})
+    assert tf.matches({"species": "S__KEEPSP"})
+    tf2 = TaxaFilter({"genus": ["Mastadenovirus"]})
+    assert tf2.matches({"genus": "g__Mastadenovirus"})
+    assert tf2.matches({"genus": "g__MASTADENOVIRUS"})
+
+
 def test_taxa_filter_matches_any_rank():
     tf = TaxaFilter({"genus": ["g__Enterovirus"]})
     assert tf.matches({"genus": "g__Enterovirus", "species": "s__SomeSpecies"})

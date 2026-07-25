@@ -138,7 +138,7 @@ postviritu run \
 
 Rank keys may be any of `kingdom`, `phylum`, `class` (or `tclass`), `order`,
 `family`, `genus`, `species`, or `subspecies`. Values may be given with or
-without the EsViritu rank prefix (`s__...`).
+without the EsViritu rank prefix (`s__...`) and are matched case-insensitively.
 
 ## Outputs
 
