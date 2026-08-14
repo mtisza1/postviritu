@@ -143,6 +143,13 @@ The filter uses OR semantics across rank entries. If any accession in an
 assembly matches, `postviritu` processes that entire assembly. Each sample
 reports the matching assembly count and warns if none match.
 
+To guard against typos that would silently skip every assembly, `postviritu`
+rejects a filter file that names ranks but lists no taxa under any of them
+(`species:` with an empty or omitted list), one that is not a rank -> list
+mapping (a bare top-level list), and entries filed under the wrong rank
+(`genus: ["s__Human mastadenovirus A"]`). An empty file is still valid and
+keeps all assemblies, as does omitting `--taxa-filter`.
+
 ## Outputs
 
 For each sample prefix, `postviritu` writes EsViritu-format tables with updated

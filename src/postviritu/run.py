@@ -46,7 +46,9 @@ def _split_info_by_taxa_filter(
     """Return (included_info, excluded_info) based on the original taxonomy.
 
     Inclusion is decided at the Assembly level: if any Accession row for an
-    assembly matches the filter, the whole assembly is processed.
+    assembly matches the filter, the whole assembly is processed. Rows with a
+    null Assembly are always kept on the included side, so the filtered path
+    hands them to the rest of the pipeline exactly as the unfiltered path does.
     """
     if taxa_filter is None or not taxa_filter.include:
         return info_df, info_df.filter(pl.lit(False))
@@ -54,11 +56,14 @@ def _split_info_by_taxa_filter(
     rows = list(info_df.iter_rows(named=True))
     included_assemblies = set()
     for row in rows:
-        if taxa_filter.matches(row):
+        if row["Assembly"] is not None and taxa_filter.matches(row):
             included_assemblies.add(row["Assembly"])
 
-    included = info_df.filter(pl.col("Assembly").is_in(list(included_assemblies)))
-    excluded = info_df.filter(~pl.col("Assembly").is_in(list(included_assemblies)))
+    # `is_in` yields null for a null Assembly, which would drop the row from
+    # both halves of the split; treat those rows as included.
+    matched = pl.col("Assembly").is_in(list(included_assemblies)).fill_null(True)
+    included = info_df.filter(matched)
+    excluded = info_df.filter(~matched)
     return included, excluded
 
 

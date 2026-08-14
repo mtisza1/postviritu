@@ -6,7 +6,7 @@ import yaml
 
 from conftest import FakeAligner, FakeTaxonomy, make_hits
 from postviritu.io_esviritu import SamplePaths, read_tsv, write_fasta
-from postviritu.run import RunConfig, run_sample
+from postviritu.run import RunConfig, _split_info_by_taxa_filter, run_sample
 from postviritu.taxonomy import TaxaFilter
 
 
@@ -100,6 +100,50 @@ def test_taxa_filter_rejects_unknown_rank():
         TaxaFilter({"notarank": ["s__Foo"]})
 
 
+@pytest.mark.parametrize("values", [[], None, {}])
+def test_taxa_filter_rejects_rank_with_no_taxa(values):
+    # An include list naming a rank but no taxa would match nothing at all and
+    # silently empty every sample; it must be an error, not a no-op.
+    with pytest.raises(ValueError, match="lists no taxa"):
+        TaxaFilter({"species": values})
+
+
+def test_taxa_filter_allows_one_empty_rank_among_several():
+    tf = TaxaFilter({"species": [], "genus": ["g__KeepGen"]})
+    assert tf.include == {"genus": {"g__keepgen"}}
+    assert tf.matches({"genus": "g__KeepGen"})
+    assert not tf.matches({"species": "s__Anything"})
+
+
+def test_taxa_filter_merges_class_and_tclass():
+    tf = TaxaFilter({"class": ["Tectiliviricetes"], "tclass": ["Caudoviricetes"]})
+    assert tf.matches({"tclass": "c__Tectiliviricetes"})
+    assert tf.matches({"tclass": "c__Caudoviricetes"})
+
+
+def test_taxa_filter_rejects_entry_with_another_ranks_prefix():
+    with pytest.raises(ValueError, match="carries the 's__' "):
+        TaxaFilter({"genus": ["s__Human mastadenovirus A"]})
+
+
+def test_taxa_filter_rejects_non_mapping():
+    with pytest.raises(ValueError, match="must be a mapping"):
+        TaxaFilter(["s__Foo"])
+
+
+def test_taxa_filter_from_yaml_rejects_top_level_list(tmp_path):
+    path = tmp_path / "filter.yaml"
+    path.write_text('- "s__KeepSp"\n- "s__OtherSp"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a mapping"):
+        TaxaFilter.from_yaml(str(path))
+
+
+def test_taxa_filter_from_yaml_empty_file_matches_all(tmp_path):
+    path = tmp_path / "filter.yaml"
+    path.write_text("", encoding="utf-8")
+    assert TaxaFilter.from_yaml(str(path)).matches({"species": "s__Anything"})
+
+
 def test_taxa_filter_from_yaml(tmp_path):
     path = tmp_path / "filter.yaml"
     path.write_text(
@@ -109,6 +153,24 @@ def test_taxa_filter_from_yaml(tmp_path):
     assert tf.matches({"species": "s__KeepSp"})
     assert tf.matches({"genus": "g__KeepGen"})
     assert not tf.matches({"species": "s__OtherSp"})
+
+
+def test_split_info_keeps_null_assembly_rows():
+    # `is_in` is null for a null Assembly, which would drop the row from both
+    # halves of the split and leave it with null taxonomy in the final output.
+    rows = [
+        _info_row("accKeep", "asmKeep", "s__KeepSp"),
+        _info_row("accSkip", "asmSkip", "s__SkipSp"),
+        _info_row("accNull", None, "s__KeepSp"),
+    ]
+    info_df = pl.DataFrame(rows, schema_overrides={"Segment": pl.Utf8})
+    included, excluded = _split_info_by_taxa_filter(
+        info_df, TaxaFilter({"species": ["s__KeepSp"]})
+    )
+
+    assert included.height + excluded.height == info_df.height
+    assert included["Accession"].to_list() == ["accKeep", "accNull"]
+    assert excluded["Accession"].to_list() == ["accSkip"]
 
 
 def test_run_sample_taxa_filter_includes_only_matching_assembly(tmp_path):
@@ -199,8 +261,11 @@ def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path, capsys):
     assert all(
         d == "taxa_filtered" for d in new_info["postviritu_decision"].to_list()
     )
+    # Filtered assemblies are a pass-through: the tax_profile applies the same
+    # avg_read_identity thresholding EsViritu itself would have applied, so an
+    # identity of 0.5 (< spthresh) collapses the species to unclassified.
     tax_profile = read_tsv(paths["tax_profile"])
-    assert set(tax_profile["species"].to_list()) == {"s__SpA", "s__SpB"}
+    assert set(tax_profile["species"].to_list()) == {"s__unclassified_OrigGen"}
     assert not os.path.exists(os.path.join(outdir, f"{prefix}_tmp"))
     output = capsys.readouterr().out
     assert "S1: 0/2 assemblies pass taxa filter" in output
