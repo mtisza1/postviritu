@@ -107,6 +107,48 @@ hits are reported per query.
 | `--bitscore-tie-frac` | `0.99` | Hits with bitscore ≥ frac × max are "tied" |
 | `--threads` | `1` | Threads for mmseqs2 |
 | `--keep-temp` | off | Keep intermediate files |
+| `--taxa-filter` | off | YAML file of taxa to include (see below) |
+
+### Process only selected taxa
+
+Because `postviritu` is most useful for a subset of predicted taxa, you can
+provide a YAML include-list. Only assemblies whose original EsViritu taxonomy
+matches an entry are re-aligned and reassigned; all others are copied through
+unchanged.
+
+Create a file such as `taxa_to_process.yaml`:
+
+```yaml
+species:
+  - "s__betacoronavirus pandemicum"
+  - "s__Human mastadenovirus A"
+genus:
+  - "g__Enterovirus"
+```
+
+Then pass it to `run` or `blastn`:
+
+```bash
+postviritu run \
+  --input-dir /path/to/esviritu_output \
+  --db /path/to/postviritu_db \
+  --outdir /path/to/postviritu_output \
+  --taxa-filter taxa_to_process.yaml
+```
+
+Rank keys may be any of `kingdom`, `phylum`, `class` (or `tclass`), `order`,
+`family`, `genus`, `species`, or `subspecies`. Values may be given with or
+without the EsViritu rank prefix (`s__...`) and are matched case-insensitively.
+The filter uses OR semantics across rank entries. If any accession in an
+assembly matches, `postviritu` processes that entire assembly. Each sample
+reports the matching assembly count and warns if none match.
+
+To guard against typos that would silently skip every assembly, `postviritu`
+rejects a filter file that names ranks but lists no taxa under any of them
+(`species:` with an empty or omitted list), one that is not a rank -> list
+mapping (a bare top-level list), and entries filed under the wrong rank
+(`genus: ["s__Human mastadenovirus A"]`). An empty file is still valid and
+keeps all assemblies, as does omitting `--taxa-filter`.
 
 ## Outputs
 
@@ -121,6 +163,8 @@ taxonomy plus provenance columns:
 Provenance columns include `esviritu_species`, `esviritu_subspecies`,
 `postviritu_hit_accession`, `postviritu_hit_taxid`, `postviritu_bitscore`,
 `postviritu_pct_identity`, `postviritu_ambiguous`, and `postviritu_decision`.
+Assemblies skipped by `--taxa-filter` retain their original taxonomy and have
+`postviritu_decision` set to `taxa_filtered`.
 
 ## Status / out of scope
 

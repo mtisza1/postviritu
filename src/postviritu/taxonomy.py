@@ -15,7 +15,10 @@ pandas DataFrames.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence
+from collections.abc import Mapping
+from typing import Dict, List, Optional, Sequence
+
+import yaml
 
 from .io_esviritu import RANK_PREFIXES, TAX_RANKS
 
@@ -167,3 +170,108 @@ class Taxonomy:
         if not result or int(result) == 0:
             return None
         return str(result)
+
+
+class TaxaFilter:
+    """Include-list filter for query assemblies based on original EsViritu taxonomy.
+
+    The YAML file maps rank names (``species``, ``genus``, etc.) to lists of
+    taxon strings. Values may be given with or without the EsViritu rank
+    prefix (``s__Human mastadenovirus A`` or ``Human mastadenovirus A``);
+    missing prefixes are added automatically from the rank key. An assembly is
+    included if any of its original lineage ranks matches the include list.
+    """
+
+    def __init__(self, include: Optional[Dict[str, List[str]]] = None) -> None:
+        self.include: Dict[str, set[str]] = {}
+        if include is None:
+            return
+        if not isinstance(include, Mapping):
+            raise ValueError(
+                "Taxonomy filter must be a mapping of rank -> list of taxa, got "
+                f"{type(include).__name__}. Example:\n  species:\n    - s__Human "
+                "mastadenovirus A"
+            )
+        if not include:
+            return
+        for rank, values in include.items():
+            rank_key = self._canonical_rank(rank)
+            if rank_key not in TAX_RANKS:
+                raise ValueError(
+                    f"Unknown taxonomy rank '{rank}'. "
+                    f"Use one of: {', '.join(TAX_RANKS)} (or 'class' for tclass)."
+                )
+            if values is None:
+                values = []
+            elif isinstance(values, str):
+                values = [values]
+            prefix = RANK_PREFIXES[rank_key]
+            # Merge rather than assign: 'class' and 'tclass' canonicalize to the
+            # same rank key, and assigning would silently drop one of them.
+            self.include.setdefault(rank_key, set()).update(
+                self._normalize(v, prefix, rank_key) for v in values
+            )
+        if not any(self.include.values()):
+            # An include list that is present but lists no taxa would match
+            # nothing at all, silently emptying every sample. That is nearly
+            # always a typo, so fail loudly instead.
+            raise ValueError(
+                "Taxonomy filter lists no taxa for any rank "
+                f"({', '.join(sorted(self.include))}). Add at least one entry, "
+                "or omit the filter entirely to keep all assemblies."
+            )
+        # Drop ranks that ended up empty so `matches` never consults an empty set.
+        self.include = {r: v for r, v in self.include.items() if v}
+
+    @staticmethod
+    def _canonical_rank(rank: str) -> str:
+        """Map common rank aliases to the internal rank names."""
+        rank = str(rank).strip().lower()
+        if rank == "class":
+            return "tclass"
+        return rank
+
+    @staticmethod
+    def _normalize(
+        value: object, prefix: str, rank_key: Optional[str] = None
+    ) -> str:
+        """Add the rank prefix (if absent) and lowercase for case-insensitive matching.
+
+        ``rank_key`` is passed when normalizing user-supplied filter entries (not
+        when normalizing lineage values). It enables a check that the entry does
+        not carry a *different* rank's prefix, which would otherwise be prefixed
+        again into something that can never match (e.g. ``genus: ["s__Foo"]``
+        becoming ``g__s__foo``).
+        """
+        value = str(value).strip()
+        lowered = value.lower()
+        if not lowered.startswith(prefix.lower()):
+            if rank_key is not None:
+                for other, other_prefix in RANK_PREFIXES.items():
+                    if other != rank_key and lowered.startswith(other_prefix.lower()):
+                        raise ValueError(
+                            f"Taxonomy filter entry '{value}' is listed under rank "
+                            f"'{rank_key}' but carries the '{other_prefix}' "
+                            f"({other}) prefix. Move it under '{other}', or use "
+                            f"the '{prefix}' prefix (or none at all)."
+                        )
+            value = prefix + value
+        return value.lower()
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "TaxaFilter":
+        with open(path) as fh:
+            data = yaml.safe_load(fh)
+        if data is None:
+            data = {}
+        return cls(data)
+
+    def matches(self, lineage: Dict[str, str]) -> bool:
+        """Return True if ``lineage`` matches the include list."""
+        if not self.include:
+            return True
+        for rank, values in self.include.items():
+            value = lineage.get(rank)
+            if value is not None and self._normalize(value, RANK_PREFIXES[rank]) in values:
+                return True
+        return False

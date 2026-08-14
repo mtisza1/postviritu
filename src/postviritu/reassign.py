@@ -93,7 +93,7 @@ def _accession_to_assembly(info_df: pl.DataFrame) -> Dict[str, str]:
     return dict(zip(sub["Accession"].to_list(), sub["Assembly"].to_list()))
 
 
-def _original_taxonomy(info_df: pl.DataFrame) -> Dict[str, Dict[str, str]]:
+def original_taxonomy(info_df: pl.DataFrame) -> Dict[str, Dict[str, str]]:
     """Return {Assembly: original 8-rank lineage} from the EsViritu info table."""
     cols = ["Assembly"] + TAX_RANKS
     sub = info_df.select([c for c in cols if c in info_df.columns]).unique(
@@ -120,7 +120,7 @@ def resolve_assemblies(
 ) -> Dict[str, AssemblyResolution]:
     """Resolve taxonomy for every Assembly present in ``info_df``."""
     acc2asm = _accession_to_assembly(info_df)
-    orig_tax = _original_taxonomy(info_df)
+    orig_tax = original_taxonomy(info_df)
     assemblies = list(orig_tax.keys())
 
     # Attach Assembly to each hit via its query Accession.

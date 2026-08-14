@@ -87,6 +87,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="NCBI taxdump dir for pytaxonkit (default: from DB manifest, "
         "else taxonkit's ~/.taxonkit).",
     )
+    p_run.add_argument(
+        "--taxa-filter",
+        default=None,
+        help="YAML file of taxa to include (default: process all).",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     # blastn
@@ -127,6 +132,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--taxdump",
         default=None,
         help="NCBI taxdump dir for pytaxonkit (default: taxonkit's ~/.taxonkit).",
+    )
+    p_blastn.add_argument(
+        "--taxa-filter",
+        default=None,
+        help="YAML file of taxa to include (default: process all).",
     )
     p_blastn.add_argument(
         "--tmp-dir",
@@ -177,7 +187,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .aligner import Mmseqs2Aligner
     from .run import RunConfig, run_batch
     from .setup_db import load_manifest, target_db_path
-    from .taxonomy import Taxonomy
+    from .taxonomy import TaxaFilter, Taxonomy
 
     manifest = load_manifest(args.db)
     target_db = target_db_path(args.db)
@@ -186,6 +196,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     aligner = Mmseqs2Aligner(target_db=target_db, mmseqs_bin=args.mmseqs_bin)
     taxonomy = Taxonomy(data_dir=taxdump, threads=args.threads)
+    taxa_filter = TaxaFilter.from_yaml(args.taxa_filter) if args.taxa_filter else None
     config = RunConfig(
         mode=args.mode,
         min_identity=args.min_identity,
@@ -196,6 +207,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         realign_ties=args.realign_ties,
         tmp_dir=args.tmp_dir,
         keep_alignments=args.keep_alignments,
+        taxa_filter=taxa_filter,
     )
     processed = run_batch(
         input_dir=args.input_dir,
@@ -212,7 +224,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_blastn(args: argparse.Namespace) -> int:
     from .aligner import BlastnAligner
     from .run import RunConfig, run_batch
-    from .taxonomy import Taxonomy
+    from .taxonomy import TaxaFilter, Taxonomy
 
     aligner = BlastnAligner(
         db=args.db,
@@ -221,6 +233,7 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
         batch_size=args.batch_size,
     )
     taxonomy = Taxonomy(data_dir=args.taxdump, threads=args.threads)
+    taxa_filter = TaxaFilter.from_yaml(args.taxa_filter) if args.taxa_filter else None
     config = RunConfig(
         mode=args.mode,
         min_identity=args.min_identity,
@@ -231,6 +244,7 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
         realign_ties=args.realign_ties,
         tmp_dir=args.tmp_dir,
         keep_alignments=args.keep_alignments,
+        taxa_filter=taxa_filter,
     )
     processed = run_batch(
         input_dir=args.input_dir,
