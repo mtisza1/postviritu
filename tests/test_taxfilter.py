@@ -90,6 +90,11 @@ def test_taxa_filter_class_alias():
     assert tf.matches({"tclass": "c__Tectiliviricetes"})
 
 
+def test_taxa_filter_normalizes_rank_keys_and_values():
+    tf = TaxaFilter({" Species ": [123]})
+    assert tf.matches({"species": "s__123"})
+
+
 def test_taxa_filter_rejects_unknown_rank():
     with pytest.raises(ValueError, match="Unknown taxonomy rank"):
         TaxaFilter({"notarank": ["s__Foo"]})
@@ -163,12 +168,14 @@ def test_run_sample_taxa_filter_includes_only_matching_assembly(tmp_path):
     assert skip_row["postviritu_hit_taxid"] is None
 
 
-def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path):
+def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path, capsys):
     prefix = "S1"
     rows = [
         _info_row("accA", "asmA", "s__SpA"),
         _info_row("accB", "asmB", "s__SpB"),
     ]
+    for row in rows:
+        row["avg_read_identity"] = 0.5
     root = _make_sample_dir(
         tmp_path, prefix, rows, {"accA": "ACGT" * 50, "accB": "TGCA" * 50}
     )
@@ -192,3 +199,9 @@ def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path):
     assert all(
         d == "taxa_filtered" for d in new_info["postviritu_decision"].to_list()
     )
+    tax_profile = read_tsv(paths["tax_profile"])
+    assert set(tax_profile["species"].to_list()) == {"s__SpA", "s__SpB"}
+    assert not os.path.exists(os.path.join(outdir, f"{prefix}_tmp"))
+    output = capsys.readouterr().out
+    assert "S1: 0/2 assemblies pass taxa filter" in output
+    assert "warning: S1: no assemblies matched the taxa filter" in output

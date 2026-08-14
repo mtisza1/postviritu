@@ -161,7 +161,11 @@ def build_tax_profile(
         identity = None
         if res is not None and res.pct_identity is not None:
             identity = res.pct_identity
-        elif res is not None and res.decision == "taxa_filtered":
+        elif res is not None and res.decision in {
+            "no_hit_kept_original",
+            "taxa_filtered",
+        }:
+            # These decisions retain the EsViritu lineage verbatim.
             identity = None
         elif row.get("avg_read_identity") is not None:
             identity = row["avg_read_identity"]

@@ -15,8 +15,9 @@ pandas DataFrames.
 
 from __future__ import annotations
 
-import yaml
 from typing import Dict, List, Optional, Sequence
+
+import yaml
 
 from .io_esviritu import RANK_PREFIXES, TAX_RANKS
 
@@ -203,14 +204,15 @@ class TaxaFilter:
     @staticmethod
     def _canonical_rank(rank: str) -> str:
         """Map common rank aliases to the internal rank names."""
+        rank = str(rank).strip().lower()
         if rank == "class":
             return "tclass"
         return rank
 
     @staticmethod
-    def _normalize(value: str, prefix: str) -> str:
+    def _normalize(value: object, prefix: str) -> str:
         """Add the rank prefix (if absent) and lowercase for case-insensitive matching."""
-        value = value.strip()
+        value = str(value).strip()
         if not value.lower().startswith(prefix.lower()):
             value = prefix + value
         return value.lower()

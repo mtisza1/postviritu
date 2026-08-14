@@ -12,6 +12,7 @@ import polars as pl
 from .aligner import Aligner, empty_hits, filter_hits
 from .io_esviritu import (
     SamplePaths,
+    TAX_RANKS,
     get_thresholds,
     iter_samples,
     load_params,
@@ -21,7 +22,7 @@ from .io_esviritu import (
     write_tsv,
 )
 from .outputs import build_assembly_summary, build_tax_profile, rebuild_info
-from .reassign import AssemblyResolution, _original_taxonomy, resolve_assemblies
+from .reassign import AssemblyResolution, original_taxonomy, resolve_assemblies
 from .taxonomy import TaxaFilter, Taxonomy
 
 
@@ -56,9 +57,6 @@ def _split_info_by_taxa_filter(
         if taxa_filter.matches(row):
             included_assemblies.add(row["Assembly"])
 
-    if not included_assemblies:
-        return info_df.filter(pl.lit(False)), info_df
-
     included = info_df.filter(pl.col("Assembly").is_in(list(included_assemblies)))
     excluded = info_df.filter(~pl.col("Assembly").is_in(list(included_assemblies)))
     return included, excluded
@@ -72,7 +70,7 @@ def _excluded_resolution(assembly: str, orig: Dict[str, Optional[str]]) -> Assem
     """
     return AssemblyResolution(
         assembly=assembly,
-        lineage={r: orig.get(r) for r in orig},
+        lineage={r: orig.get(r) for r in TAX_RANKS},
         decision="taxa_filtered",
         esviritu_species=orig.get("species"),
         esviritu_subspecies=orig.get("subspecies"),
@@ -101,17 +99,32 @@ def run_sample(
     included_info, excluded_info = _split_info_by_taxa_filter(
         info_df, config.taxa_filter
     )
+    filter_active = config.taxa_filter is not None and bool(config.taxa_filter.include)
+    if filter_active:
+        included_count = included_info["Assembly"].n_unique()
+        total_count = info_df["Assembly"].n_unique()
+        print(
+            f"[postviritu] {sample.prefix}: {included_count}/{total_count} "
+            "assemblies pass taxa filter"
+        )
+        if included_count == 0:
+            print(
+                f"[postviritu] warning: {sample.prefix}: no assemblies matched "
+                "the taxa filter"
+            )
+
     included_accessions = set(included_info["Accession"].to_list())
     included_seqs = {
         acc: seq for acc, seq in consensus_seqs.items() if acc in included_accessions
     }
 
-    tmp_dir = config.tmp_dir or os.path.join(outdir, f"{sample.prefix}_tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
-
     if included_seqs:
-        query_fasta = os.path.join(tmp_dir, f"{sample.prefix}_query.fasta")
-        write_fasta(included_seqs, query_fasta)
+        tmp_dir = config.tmp_dir or os.path.join(outdir, f"{sample.prefix}_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        query_fasta = sample.consensus
+        if filter_active:
+            query_fasta = os.path.join(tmp_dir, f"{sample.prefix}_query.fasta")
+            write_fasta(included_seqs, query_fasta)
         query_nonN_len = {
             acc: sum(1 for base in seq if base not in "Nn")
             for acc, seq in included_seqs.items()
@@ -151,7 +164,7 @@ def run_sample(
         resolutions.update(inc_res)
 
     if not excluded_info.is_empty():
-        for asm, orig in _original_taxonomy(excluded_info).items():
+        for asm, orig in original_taxonomy(excluded_info).items():
             resolutions[asm] = _excluded_resolution(asm, orig)
 
     new_info = rebuild_info(info_df, resolutions)

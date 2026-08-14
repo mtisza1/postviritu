@@ -139,6 +139,9 @@ postviritu run \
 Rank keys may be any of `kingdom`, `phylum`, `class` (or `tclass`), `order`,
 `family`, `genus`, `species`, or `subspecies`. Values may be given with or
 without the EsViritu rank prefix (`s__...`) and are matched case-insensitively.
+The filter uses OR semantics across rank entries. If any accession in an
+assembly matches, `postviritu` processes that entire assembly. Each sample
+reports the matching assembly count and warns if none match.
 
 ## Outputs
 
@@ -153,6 +156,8 @@ taxonomy plus provenance columns:
 Provenance columns include `esviritu_species`, `esviritu_subspecies`,
 `postviritu_hit_accession`, `postviritu_hit_taxid`, `postviritu_bitscore`,
 `postviritu_pct_identity`, `postviritu_ambiguous`, and `postviritu_decision`.
+Assemblies skipped by `--taxa-filter` retain their original taxonomy and have
+`postviritu_decision` set to `taxa_filtered`.
 
 ## Status / out of scope
 
