@@ -32,6 +32,8 @@ HIT_COLUMNS = [
     "query_coverage",  # fraction 0-1
     "evalue",
     "bitscore",
+    "qaln",
+    "taln",
 ]
 
 HIT_SCHEMA = {
@@ -44,6 +46,8 @@ HIT_SCHEMA = {
     "query_coverage": pl.Float64,
     "evalue": pl.Float64,
     "bitscore": pl.Float64,
+    "qaln": pl.Utf8,
+    "taln": pl.Utf8,
 }
 
 

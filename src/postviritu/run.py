@@ -23,6 +23,7 @@ from .io_esviritu import (
 )
 from .outputs import build_assembly_summary, build_tax_profile, rebuild_info
 from .reassign import AssemblyResolution, original_taxonomy, resolve_assemblies
+from .report import write_html_report
 from .taxonomy import TaxaFilter, Taxonomy
 
 
@@ -181,6 +182,7 @@ def run_sample(
     write_tsv(new_info, out.info)
     write_tsv(assembly_summary, out.assembly_summary)
     write_tsv(tax_profile, out.tax_profile)
+    write_html_report(out.report, sample.prefix, info_df, hits, resolutions, taxonomy)
 
     # Pass-through files (unchanged) when present.
     for src in [sample.coverage_windows, sample.params, sample.readstats]:
@@ -191,6 +193,7 @@ def run_sample(
         "info": out.info,
         "assembly_summary": out.assembly_summary,
         "tax_profile": out.tax_profile,
+        "report": out.report,
     }
 
 
