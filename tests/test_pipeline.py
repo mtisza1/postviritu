@@ -19,6 +19,9 @@ def test_run_sample_scratch_no_hits_unclassified(
     assert os.path.isfile(paths["info"])
     assert os.path.isfile(paths["assembly_summary"])
     assert os.path.isfile(paths["tax_profile"])
+    assert os.path.isfile(paths["report"])
+    with open(paths["report"]) as report:
+        assert report.read().count('class="query-page"') == 2
     # Coverage windows passed through unchanged.
     assert os.path.isfile(
         os.path.join(outdir, example_prefix + ".virus_coverage_windows.tsv")

@@ -158,7 +158,14 @@ taxonomy plus provenance columns:
 - `{PREFIX}.detected_virus.info.tsv`
 - `{PREFIX}.detected_virus.assembly_summary.tsv`
 - `{PREFIX}.tax_profile.tsv`
+- `{PREFIX}.postviritu_report.html`
 - `{PREFIX}.virus_coverage_windows.tsv` (copied unchanged)
+
+The self-contained HTML report has one paginated view per query, shows the
+original-to-proposed taxonomy change, and groups up to six database taxa into
+two-column cards. Each card includes up to six reference alignments with ANI,
+query coverage, score, e-value, and BLAST-style query/reference sequence blocks.
+Use the Previous/Next controls or left/right arrow keys to move between queries.
 
 Provenance columns include `esviritu_species`, `esviritu_subspecies`,
 `postviritu_hit_accession`, `postviritu_hit_taxid`, `postviritu_bitscore`,
@@ -169,5 +176,4 @@ Assemblies skipped by `--taxa-filter` retain their original taxonomy and have
 ## Status / out of scope
 
 The package implements both the `mmseqs2` and `blastn -remote` backends via a
-pluggable aligner interface, and does not regenerate HTML reports or re-map
-reads.
+pluggable aligner interface and does not re-map reads.

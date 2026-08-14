@@ -23,6 +23,7 @@ COVERAGE_SUFFIX = ".virus_coverage_windows.tsv"
 CONSENSUS_SUFFIX = "_final_consensus.fasta"
 PARAMS_SUFFIX = "_esviritu.params.yaml"
 READSTATS_SUFFIX = "_esviritu.readstats.yaml"
+REPORT_SUFFIX = ".postviritu_report.html"
 
 CONSENSUS_HEADER_SUFFIX = "_consensus"
 
@@ -85,6 +86,10 @@ class SamplePaths:
     @property
     def readstats(self) -> str:
         return os.path.join(self.directory, self.prefix + READSTATS_SUFFIX)
+
+    @property
+    def report(self) -> str:
+        return os.path.join(self.directory, self.prefix + REPORT_SUFFIX)
 
     def missing_required(self) -> List[str]:
         """Return the list of required input files that do not exist."""
