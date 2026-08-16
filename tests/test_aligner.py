@@ -87,3 +87,20 @@ def test_parse_m8_coverage_fallback_without_map(tmp_path):
     row = df.row(0, named=True)
     assert row["pct_identity"] == 1.0
     assert abs(row["query_coverage"] - 0.42) < 1e-9
+
+
+def test_parse_m8_coverage_counts_only_canonical_bases(tmp_path):
+    m8 = tmp_path / "result.m8"
+    # The aligned query contains an N at position 3. Only the four canonical
+    # (A, T, C, G) aligned positions count toward coverage; the full query has
+    # five canonical bases.
+    line = "accF_consensus\ttgt\t100\t0.5\t5\t10\t0.5\t1e-50\t500\tACNGT\tACAGT"
+    m8.write_text(line + "\n")
+    df = parse_m8(
+        str(m8), Mmseqs2Aligner._FORMAT_FIELDS, query_nonN_len={"accF": 5}
+    )
+    row = df.row(0, named=True)
+    # Identity denominator excludes the N column -> 4 canonical matches / 4.
+    assert row["pct_identity"] == 1.0
+    # Coverage = aligned canonical query bases / total canonical query bases.
+    assert abs(row["query_coverage"] - 0.8) < 1e-9

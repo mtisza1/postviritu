@@ -18,7 +18,12 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import polars as pl
 
-from .io_esviritu import parse_consensus_fasta, write_fasta
+from .io_esviritu import (
+    CANONICAL_BASES,
+    canonical_base_count,
+    parse_consensus_fasta,
+    write_fasta,
+)
 
 # Columns every aligner must return. ``query`` is the EsViritu Accession,
 # ``target`` is the DB sequence id, ``taxid`` is the NCBI taxid of the target.
@@ -192,10 +197,10 @@ def parse_m8(
     When the gapped aligned sequences (``qaln``/``taln``) are present,
     ``pct_identity`` and ``query_coverage`` are recomputed to exclude N
     positions: identity is matching residues over alignment columns where
-    neither query nor target is N (or a gap), and coverage is the count of
-    aligned non-N query residues over ``query_nonN_len`` (the query's total
-    non-N residue count). Columns left untouched fall back to the values mmseqs
-    reported.
+    neither query nor target is N (or a gap), and coverage is the fraction of
+    canonical query bases (A, T, C, or G) that are aligned.
+    ``query_nonN_len`` should therefore be the query's total canonical base
+    count. Columns left untouched fall back to the values mmseqs reported.
     """
     if not os.path.isfile(path) or os.path.getsize(path) == 0:
         return empty_hits()
@@ -243,10 +248,10 @@ def _recompute_nonN_metrics(
     """Recompute ``pct_identity`` and ``query_coverage`` excluding N positions.
 
     Identity is computed over alignment columns where neither the query nor
-    target residue is a gap or N. Coverage is the number of aligned non-N query
-    residues divided by the query's total non-N residue count
-    (``query_nonN_len``); when that count is unavailable for a query, the
-    mmseqs-reported coverage is kept.
+    target residue is a gap or N. Coverage is the fraction of canonical query
+    bases (A, T, C, or G) that are aligned, i.e. aligned canonical query bases
+    divided by ``query_nonN_len`` (the query's total canonical base count); when
+    that count is unavailable for a query, the mmseqs-reported coverage is kept.
     """
     query_nonN_len = query_nonN_len or {}
     qalns = raw["qaln"].to_list()
@@ -263,15 +268,16 @@ def _recompute_nonN_metrics(
     for qaln, taln, query, ocov in zip(qalns, talns, queries, orig_cov):
         matches = 0
         id_denom = 0
-        aligned_nonN_query = 0
+        aligned_canonical_query = 0
         if qaln and taln:
             for cq, ct in zip(qaln, taln):
                 if cq == "-":
                     continue
                 cq_u = cq.upper()
                 q_is_n = cq_u == "N"
-                if not q_is_n:
-                    aligned_nonN_query += 1
+                q_is_canonical = cq_u in CANONICAL_BASES
+                if q_is_canonical:
+                    aligned_canonical_query += 1
                 if ct == "-" or q_is_n or ct.upper() == "N":
                     continue
                 id_denom += 1
@@ -280,7 +286,7 @@ def _recompute_nonN_metrics(
         new_pid.append(matches / id_denom if id_denom else 0.0)
         total = query_nonN_len.get(query)
         if total:
-            new_cov.append(aligned_nonN_query / total)
+            new_cov.append(aligned_canonical_query / total)
         else:
             new_cov.append(ocov)
 

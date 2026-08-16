@@ -22,7 +22,12 @@ from typing import Dict, List, Optional
 
 import polars as pl
 
-from .io_esviritu import RANK_PREFIXES, TAX_RANKS, write_fasta
+from .io_esviritu import (
+    RANK_PREFIXES,
+    TAX_RANKS,
+    canonical_base_count,
+    write_fasta,
+)
 from .taxonomy import Taxonomy, unclassified_lineage
 
 MODE_SCRATCH = "scratch"
@@ -297,8 +302,7 @@ def _second_round_tie_check(
         fasta_path = os.path.join(tmp_dir, "subset.fasta")
         write_fasta(subset, fasta_path)
         query_nonN_len = {
-            acc: sum(1 for base in seq if base not in "Nn")
-            for acc, seq in subset.items()
+            acc: canonical_base_count(seq) for acc, seq in subset.items()
         }
         round2 = aligner.search(
             fasta_path,

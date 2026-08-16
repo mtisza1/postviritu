@@ -13,6 +13,7 @@ from .aligner import Aligner, empty_hits, filter_hits
 from .io_esviritu import (
     SamplePaths,
     TAX_RANKS,
+    canonical_base_count,
     get_thresholds,
     iter_samples,
     load_params,
@@ -132,8 +133,7 @@ def run_sample(
             query_fasta = os.path.join(tmp_dir, f"{sample.prefix}_query.fasta")
             write_fasta(included_seqs, query_fasta)
         query_nonN_len = {
-            acc: sum(1 for base in seq if base not in "Nn")
-            for acc, seq in included_seqs.items()
+            acc: canonical_base_count(seq) for acc, seq in included_seqs.items()
         }
         hits = aligner.search(
             query_fasta,
@@ -182,7 +182,16 @@ def run_sample(
     write_tsv(new_info, out.info)
     write_tsv(assembly_summary, out.assembly_summary)
     write_tsv(tax_profile, out.tax_profile)
-    write_html_report(out.report, sample.prefix, info_df, hits, resolutions, taxonomy)
+    write_html_report(
+        out.report,
+        sample.prefix,
+        info_df,
+        hits,
+        resolutions,
+        taxonomy,
+        consensus_seqs=included_seqs,
+        tie_frac=config.bitscore_tie_frac,
+    )
 
     # Pass-through files (unchanged) when present.
     for src in [sample.coverage_windows, sample.params, sample.readstats]:
