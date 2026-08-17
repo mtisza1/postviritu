@@ -102,7 +102,7 @@ hits are reported per query.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--min-identity` | `0.9` | Minimum fraction identity for an acceptable hit |
-| `--min-aln-fraction` | `0.5` | Minimum query alignment fraction |
+| `--min-aln-fraction` | `0.5` | Minimum fraction of canonical query bases (A, T, C, or G) aligned |
 | `--max-evalue` | `1e-10` | Maximum e-value |
 | `--bitscore-tie-frac` | `0.99` | Hits with bitscore ≥ frac × max are "tied" |
 | `--threads` | `1` | Threads for mmseqs2 |
@@ -163,9 +163,14 @@ taxonomy plus provenance columns:
 
 The self-contained HTML report has one paginated view per query, shows the
 original-to-proposed taxonomy change, and groups up to six database taxa into
-two-column cards. Each card includes up to six reference alignments with ANI,
-query coverage, score, e-value, and BLAST-style query/reference sequence blocks.
-Use the Previous/Next controls or left/right arrow keys to move between queries.
+two-column cards. Each card displays the rank of its best hit (with ties),
+the species/subspecies of the reference taxon, and up to six reference
+alignments with ANI, query coverage, score, e-value, and BLAST-style
+query/reference sequence blocks. A searchable dropdown jumps directly to any
+query of interest, and each page exposes the query's consensus FASTA sequence
+in a dropdown. Assemblies skipped by `--taxa-filter` are omitted from the
+report. Use the Previous/Next controls or left/right arrow keys to move between
+queries.
 
 Provenance columns include `esviritu_species`, `esviritu_subspecies`,
 `postviritu_hit_accession`, `postviritu_hit_taxid`, `postviritu_bitscore`,

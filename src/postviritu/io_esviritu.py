@@ -27,6 +27,19 @@ REPORT_SUFFIX = ".postviritu_report.html"
 
 CONSENSUS_HEADER_SUFFIX = "_consensus"
 
+# Canonical nucleotide bases used for alignment-fraction calculations.
+CANONICAL_BASES = frozenset("ATCG")
+
+
+def canonical_base_count(seq: str) -> int:
+    """Return the number of canonical (A, T, C, G) bases in ``seq``.
+
+    Matching is case-insensitive so both lower- and upper-case FASTA sequences
+    are counted correctly.
+    """
+    return sum(1 for base in seq if base.upper() in CANONICAL_BASES)
+
+
 # The 8 EsViritu taxonomy ranks, in order.
 TAX_RANKS = [
     "kingdom",

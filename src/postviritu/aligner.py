@@ -18,7 +18,12 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import polars as pl
 
-from .io_esviritu import parse_consensus_fasta, write_fasta
+from .io_esviritu import (
+    CANONICAL_BASES,
+    canonical_base_count,
+    parse_consensus_fasta,
+    write_fasta,
+)
 
 # Columns every aligner must return. ``query`` is the EsViritu Accession,
 # ``target`` is the DB sequence id, ``taxid`` is the NCBI taxid of the target.
@@ -34,6 +39,16 @@ HIT_COLUMNS = [
     "bitscore",
     "qaln",
     "taln",
+    "qstart",
+    "qend",
+    "tstart",
+    "tend",
+    "segment_pct_identity",
+    "segment_aln_length",
+    "segment_query_coverage",
+    "segment_evalue",
+    "segment_bitscore",
+    "segment_selected",
 ]
 
 HIT_SCHEMA = {
@@ -48,6 +63,16 @@ HIT_SCHEMA = {
     "bitscore": pl.Float64,
     "qaln": pl.Utf8,
     "taln": pl.Utf8,
+    "qstart": pl.Int64,
+    "qend": pl.Int64,
+    "tstart": pl.Int64,
+    "tend": pl.Int64,
+    "segment_pct_identity": pl.Float64,
+    "segment_aln_length": pl.Int64,
+    "segment_query_coverage": pl.Float64,
+    "segment_evalue": pl.Float64,
+    "segment_bitscore": pl.Float64,
+    "segment_selected": pl.Boolean,
 }
 
 
@@ -104,6 +129,10 @@ class Mmseqs2Aligner(Aligner):
         "bits",
         "qaln",
         "taln",
+        "qstart",
+        "qend",
+        "tstart",
+        "tend",
     ]
 
     def __init__(
@@ -178,6 +207,166 @@ class Mmseqs2Aligner(Aligner):
                 shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def _segment_value(hit: dict, field: str, default=None):
+    value = hit.get(f"segment_{field}")
+    return hit.get(field, default) if value is None else value
+
+
+def _oriented_coordinates(hit: dict):
+    values = [hit.get(field) for field in ("qstart", "qend", "tstart", "tend")]
+    if any(value is None for value in values):
+        return None
+    qstart, qend, tstart, tend = (int(value) for value in values)
+    qdir = 1 if qend >= qstart else -1
+    tdir = 1 if tend >= tstart else -1
+    return (
+        qdir,
+        tdir,
+        qdir * qstart,
+        qdir * qend,
+        tdir * tstart,
+        tdir * tend,
+    )
+
+
+def _best_segment_chain(hits: List[dict]) -> List[dict]:
+    positioned = []
+    unpositioned = []
+    for hit in hits:
+        coordinates = _oriented_coordinates(hit)
+        if coordinates is None:
+            unpositioned.append(hit)
+        else:
+            positioned.append((hit, coordinates))
+
+    candidates: List[Tuple[float, List[dict]]] = [
+        (float(_segment_value(hit, "bitscore", 0) or 0), [hit])
+        for hit in unpositioned
+    ]
+    orientations = dict.fromkeys((coords[0], coords[1]) for _, coords in positioned)
+    for orientation in orientations:
+        members = [
+            (hit, coords)
+            for hit, coords in positioned
+            if (coords[0], coords[1]) == orientation
+        ]
+        members.sort(key=lambda item: (item[1][2], item[1][4], item[1][3], item[1][5]))
+        scores = [float(_segment_value(hit, "bitscore", 0) or 0) for hit, _ in members]
+        previous = [-1] * len(members)
+        for i, (_, coords) in enumerate(members):
+            for j in range(i):
+                previous_coords = members[j][1]
+                if previous_coords[3] < coords[2] and previous_coords[5] < coords[4]:
+                    candidate = scores[j] + float(
+                        _segment_value(members[i][0], "bitscore", 0) or 0
+                    )
+                    if candidate > scores[i]:
+                        scores[i] = candidate
+                        previous[i] = j
+        if members:
+            end = max(range(len(members)), key=scores.__getitem__)
+            chain = []
+            while end >= 0:
+                chain.append(members[end][0])
+                end = previous[end]
+            candidates.append((max(scores), list(reversed(chain))))
+
+    if not candidates:
+        return []
+    return max(candidates, key=lambda item: (item[0], len(item[1])))[1]
+
+
+def _combined_identity(hits: List[dict]) -> float:
+    matches = 0
+    denominator = 0
+    for hit in hits:
+        qaln = hit.get("qaln")
+        taln = hit.get("taln")
+        if not qaln or not taln:
+            continue
+        for query, target in zip(qaln, taln):
+            if query == "-" or target == "-":
+                continue
+            query = query.upper()
+            target = target.upper()
+            if query == "N" or target == "N":
+                continue
+            denominator += 1
+            matches += query == target
+    if denominator:
+        return matches / denominator
+
+    weighted = 0.0
+    total = 0
+    for hit in hits:
+        length = int(_segment_value(hit, "aln_length", 0) or 0)
+        weighted += float(_segment_value(hit, "pct_identity", 0) or 0) * length
+        total += length
+    return weighted / total if total else 0.0
+
+
+def aggregate_hits(hits: pl.DataFrame) -> pl.DataFrame:
+    """Combine compatible alignment segments for each query/reference pair."""
+    if hits.is_empty():
+        return empty_hits()
+
+    grouped: Dict[Tuple[object, object, object], List[dict]] = {}
+    for hit in hits.iter_rows(named=True):
+        key = (hit.get("query"), hit.get("target"), hit.get("taxid"))
+        grouped.setdefault(key, []).append(hit)
+
+    output = []
+    for segments in grouped.values():
+        selected = _best_segment_chain(segments)
+        if not selected:
+            continue
+        bitscore = sum(float(_segment_value(hit, "bitscore", 0) or 0) for hit in selected)
+        coverage = min(
+            1.0,
+            sum(
+                float(_segment_value(hit, "query_coverage", 0) or 0)
+                for hit in selected
+            ),
+        )
+        evalues = [
+            float(value)
+            for hit in selected
+            if (value := _segment_value(hit, "evalue")) is not None
+        ]
+        aln_length = sum(
+            int(_segment_value(hit, "aln_length", 0) or 0) for hit in selected
+        )
+        identity = _combined_identity(selected)
+        selected_ids = {id(hit) for hit in selected}
+        for hit in segments:
+            row = {field: hit.get(field) for field in HIT_COLUMNS}
+            row.update(
+                {
+                    "pct_identity": identity,
+                    "aln_length": aln_length,
+                    "query_coverage": coverage,
+                    "evalue": min(evalues) if evalues else None,
+                    "bitscore": bitscore,
+                    "segment_pct_identity": float(
+                        _segment_value(hit, "pct_identity", 0) or 0
+                    ),
+                    "segment_aln_length": int(
+                        _segment_value(hit, "aln_length", 0) or 0
+                    ),
+                    "segment_query_coverage": float(
+                        _segment_value(hit, "query_coverage", 0) or 0
+                    ),
+                    "segment_evalue": _segment_value(hit, "evalue"),
+                    "segment_bitscore": float(
+                        _segment_value(hit, "bitscore", 0) or 0
+                    ),
+                    "segment_selected": id(hit) in selected_ids,
+                }
+            )
+            output.append(row)
+    return pl.DataFrame(output, schema=HIT_SCHEMA)
+
+
 def parse_m8(
     path: str,
     fields: List[str],
@@ -192,10 +381,10 @@ def parse_m8(
     When the gapped aligned sequences (``qaln``/``taln``) are present,
     ``pct_identity`` and ``query_coverage`` are recomputed to exclude N
     positions: identity is matching residues over alignment columns where
-    neither query nor target is N (or a gap), and coverage is the count of
-    aligned non-N query residues over ``query_nonN_len`` (the query's total
-    non-N residue count). Columns left untouched fall back to the values mmseqs
-    reported.
+    neither query nor target is N (or a gap), and coverage is the fraction of
+    canonical query bases (A, T, C, or G) that are aligned.
+    ``query_nonN_len`` should therefore be the query's total canonical base
+    count. Columns left untouched fall back to the values mmseqs reported.
     """
     if not os.path.isfile(path) or os.path.getsize(path) == 0:
         return empty_hits()
@@ -234,7 +423,7 @@ def parse_m8(
         if col not in raw.columns:
             raw = raw.with_columns(pl.lit(None).cast(dtype).alias(col))
 
-    return raw.select(HIT_COLUMNS).cast(HIT_SCHEMA, strict=False)
+    return aggregate_hits(raw.select(HIT_COLUMNS).cast(HIT_SCHEMA, strict=False))
 
 
 def _recompute_nonN_metrics(
@@ -243,10 +432,10 @@ def _recompute_nonN_metrics(
     """Recompute ``pct_identity`` and ``query_coverage`` excluding N positions.
 
     Identity is computed over alignment columns where neither the query nor
-    target residue is a gap or N. Coverage is the number of aligned non-N query
-    residues divided by the query's total non-N residue count
-    (``query_nonN_len``); when that count is unavailable for a query, the
-    mmseqs-reported coverage is kept.
+    target residue is a gap or N. Coverage is the fraction of canonical query
+    bases (A, T, C, or G) that are aligned, i.e. aligned canonical query bases
+    divided by ``query_nonN_len`` (the query's total canonical base count); when
+    that count is unavailable for a query, the mmseqs-reported coverage is kept.
     """
     query_nonN_len = query_nonN_len or {}
     qalns = raw["qaln"].to_list()
@@ -263,15 +452,16 @@ def _recompute_nonN_metrics(
     for qaln, taln, query, ocov in zip(qalns, talns, queries, orig_cov):
         matches = 0
         id_denom = 0
-        aligned_nonN_query = 0
+        aligned_canonical_query = 0
         if qaln and taln:
             for cq, ct in zip(qaln, taln):
                 if cq == "-":
                     continue
                 cq_u = cq.upper()
                 q_is_n = cq_u == "N"
-                if not q_is_n:
-                    aligned_nonN_query += 1
+                q_is_canonical = cq_u in CANONICAL_BASES
+                if q_is_canonical:
+                    aligned_canonical_query += 1
                 if ct == "-" or q_is_n or ct.upper() == "N":
                     continue
                 id_denom += 1
@@ -280,7 +470,7 @@ def _recompute_nonN_metrics(
         new_pid.append(matches / id_denom if id_denom else 0.0)
         total = query_nonN_len.get(query)
         if total:
-            new_cov.append(aligned_nonN_query / total)
+            new_cov.append(aligned_canonical_query / total)
         else:
             new_cov.append(ocov)
 
@@ -330,6 +520,8 @@ def parse_blastn(
         "qlen": "query_length",
         "qseq": "qaln",
         "sseq": "taln",
+        "sstart": "tstart",
+        "send": "tend",
     }
     raw = raw.rename({k: v for k, v in rename.items() if k in raw.columns})
 
@@ -360,7 +552,7 @@ def parse_blastn(
         if col not in raw.columns:
             raw = raw.with_columns(pl.lit(None).cast(dtype).alias(col))
 
-    return raw.select(HIT_COLUMNS).cast(HIT_SCHEMA, strict=False)
+    return aggregate_hits(raw.select(HIT_COLUMNS).cast(HIT_SCHEMA, strict=False))
 
 
 class BlastnAligner(Aligner):
@@ -379,6 +571,10 @@ class BlastnAligner(Aligner):
         "bitscore",
         "qseq",
         "sseq",
+        "qstart",
+        "qend",
+        "sstart",
+        "send",
     ]
 
     def __init__(
@@ -485,6 +681,7 @@ def filter_hits(
     """Keep only acceptable hits and drop rows with a missing/0 taxid."""
     if hits.is_empty():
         return hits
+    hits = aggregate_hits(hits)
     return hits.filter(
         (pl.col("pct_identity") >= min_identity)
         & (pl.col("query_coverage") >= min_aln_fraction)
