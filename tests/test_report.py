@@ -66,6 +66,7 @@ def test_write_html_report_paginates_caps_cards_and_escapes_content(tmp_path):
     assert report.count('class="query-page"') == 1
     assert report.count('class="taxon-card"') == 6
     assert report.count('class="reference-alignment"') == 36
+    assert report.count('class="reference-taxonomy"') == 36
     assert "Original taxonomy" in report
     assert "Proposed taxonomy" in report
     assert "Database species 6" not in report
@@ -139,9 +140,39 @@ def test_write_html_report_shows_reference_species_and_subspecies(tmp_path):
     write_html_report(str(path), "S1", _info_df(), hits, _resolutions(), taxonomy)
 
     report = path.read_text()
-    assert "Human mastadenovirus F" in report
-    assert "Human mastadenovirus F1" in report
+    assert (
+        '<span class="reference-taxonomy">Human mastadenovirus F · '
+        "Human mastadenovirus F1</span>"
+    ) in report
+    assert 'class="ref-species"' not in report
     assert "1st" in report
+
+
+def test_write_html_report_strips_gi_prefix_from_reference_accession(tmp_path):
+    hits = pl.DataFrame(
+        [
+            {
+                "query": "query<script>",
+                "target": "gi|123456789|ref|NC_001405.1|",
+                "taxid": "100",
+                "pct_identity": 0.99,
+                "aln_length": 8,
+                "query_length": 8,
+                "query_coverage": 1.0,
+                "evalue": 1e-20,
+                "bitscore": 1000.0,
+                "qaln": "ACGTACGT",
+                "taln": "ACGTACGT",
+            }
+        ],
+        schema=HIT_SCHEMA,
+    )
+    path = tmp_path / "report.html"
+    write_html_report(str(path), "S1", _info_df(), hits, _resolutions(), _taxonomy())
+
+    report = path.read_text()
+    assert ">NC_001405.1</span>" in report
+    assert "gi|123456789" not in report
 
 
 def test_write_html_report_filters_taxa_filtered_records(tmp_path):
@@ -231,3 +262,44 @@ def test_write_html_report_adds_rank_labels_and_allows_ties(tmp_path):
     report = path.read_text()
     assert report.count("1st (tied)") == 2
     assert report.count("2nd") == 1
+
+
+def test_write_html_report_groups_segments_under_one_reference(tmp_path):
+    hits = pl.DataFrame(
+        [
+            {
+                "query": "query<script>",
+                "target": "ref1",
+                "taxid": "100",
+                "pct_identity": 0.99,
+                "aln_length": 8,
+                "query_length": 20,
+                "query_coverage": 0.8,
+                "evalue": 1e-20,
+                "bitscore": 180.0,
+                "qaln": "ACGTACGT",
+                "taln": "ACGTACGT",
+            },
+            {
+                "query": "query<script>",
+                "target": "ref1",
+                "taxid": "100",
+                "pct_identity": 0.99,
+                "aln_length": 8,
+                "query_length": 20,
+                "query_coverage": 0.8,
+                "evalue": 1e-18,
+                "bitscore": 180.0,
+                "qaln": "TGCATGCA",
+                "taln": "TGCATGCA",
+            },
+        ],
+        schema=HIT_SCHEMA,
+    )
+    path = tmp_path / "report.html"
+    write_html_report(str(path), "S1", _info_df(), hits, _resolutions(), _taxonomy())
+
+    report = path.read_text()
+    assert report.count('class="reference-alignment"') == 1
+    assert report.count('<pre class="alignment">') == 2
+    assert report.count(">ref1</span>") == 1

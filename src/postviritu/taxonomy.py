@@ -33,7 +33,13 @@ _NCBI_RANK_SOURCES = {
     "family": ["family"],
     "genus": ["genus"],
     "species": ["species"],
-    "subspecies": ["subspecies", "strain", "serotype", "no rank"],
+    "subspecies": [
+        "subspecies",
+        "strain",
+        "serotype",
+        "terminal no rank",
+        "no rank",
+    ],
 }
 
 _DEFAULT_ROOT = "Viruses"
@@ -45,8 +51,8 @@ def map_ranks_to_esviritu(
     """Map a {ncbi_rank: name} dict to the 8 EsViritu ranks (with prefixes).
 
     Missing ranks are filled as ``<prefix>unclassified_<nearest ancestor>``.
-    The ``subspecies`` slot only uses an explicit sub-species rank; it is never
-    auto-filled here (EsViritu derives ``t__`` from species via thresholding).
+    The ``subspecies`` slot uses an explicit sub-species rank or the queried
+    terminal ``no rank`` node when it descends from a species.
     """
     out: Dict[str, str] = {}
     last_real: Optional[str] = None
@@ -129,6 +135,8 @@ class Taxonomy:
                 self._lineage_cache[taxid] = self._row_to_rank_map(
                     getattr(row, "FullLineage", None),
                     getattr(row, "FullLineageRanks", None),
+                    getattr(row, "Name", None),
+                    getattr(row, "Rank", None),
                 )
             # Any taxid that produced no output gets an empty map.
             for t in missing:
@@ -136,13 +144,21 @@ class Taxonomy:
         return {t: self._lineage_cache.get(t, {}) for t in unique}
 
     @staticmethod
-    def _row_to_rank_map(names, ranks) -> Dict[str, str]:
-        if _is_missing(names) or _is_missing(ranks):
-            return {}
+    def _row_to_rank_map(
+        names, ranks, terminal_name=None, terminal_rank=None
+    ) -> Dict[str, str]:
         rank_map: Dict[str, str] = {}
-        for name, rank in zip(str(names).split(";"), str(ranks).split(";")):
-            if name and rank:
-                rank_map[rank] = name
+        if not _is_missing(names) and not _is_missing(ranks):
+            for name, rank in zip(str(names).split(";"), str(ranks).split(";")):
+                if name and rank:
+                    rank_map[rank] = name
+        if not _is_missing(terminal_name) and not _is_missing(terminal_rank):
+            terminal_name = str(terminal_name)
+            terminal_rank = str(terminal_rank)
+            if terminal_rank == "no rank" and "species" in rank_map:
+                rank_map["terminal no rank"] = terminal_name
+            elif terminal_rank != "no rank":
+                rank_map[terminal_rank] = terminal_name
         return rank_map
 
     def esviritu_lineage(self, taxid: str) -> Dict[str, str]:

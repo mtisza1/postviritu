@@ -78,6 +78,55 @@ def test_scratch_single_taxon_assigned():
     assert res["asmB"].lineage["species"] == "s__unclassified_Viruses"
 
 
+def test_scratch_combines_segments_for_provenance_score():
+    hits = make_hits(
+        [
+            {
+                "query": "accA1",
+                "target": "tgtA",
+                "taxid": "100",
+                "pct_identity": 1.0,
+                "aln_length": 400,
+                "query_length": 1000,
+                "query_coverage": 0.4,
+                "evalue": 1e-50,
+                "bitscore": 500.0,
+                "qaln": "A" * 400,
+                "taln": "A" * 400,
+                "qstart": 1,
+                "qend": 400,
+                "tstart": 1,
+                "tend": 400,
+            },
+            {
+                "query": "accA1",
+                "target": "tgtA",
+                "taxid": "100",
+                "pct_identity": 1.0,
+                "aln_length": 400,
+                "query_length": 1000,
+                "query_coverage": 0.4,
+                "evalue": 1e-40,
+                "bitscore": 400.0,
+                "qaln": "C" * 400,
+                "taln": "C" * 400,
+                "qstart": 601,
+                "qend": 1000,
+                "tstart": 601,
+                "tend": 1000,
+            },
+        ]
+    )
+
+    resolution = resolve_assemblies(
+        hits, _info_df(), _taxonomy(), mode=MODE_SCRATCH
+    )["asmA"]
+
+    assert resolution.hit_accession == "tgtA"
+    assert resolution.bitscore == 900.0
+    assert resolution.pct_identity == 1.0
+
+
 def test_scratch_tie_uses_lca():
     hits = make_hits(
         [

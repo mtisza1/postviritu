@@ -27,6 +27,14 @@ def _display_taxon(value: Optional[str]) -> str:
     return value.split("__", 1)[-1] or "unclassified"
 
 
+def _display_reference(value: Optional[str]) -> str:
+    text = "" if value is None else str(value)
+    parts = text.split("|")
+    if len(parts) >= 4 and parts[0].lower() == "gi" and parts[1].isdigit():
+        return parts[3] or text
+    return text
+
+
 def _lineage(lineage: Dict[str, Optional[str]]) -> str:
     parts = [
         f'<span><b>{_escape(rank)}</b> {_escape(_display_taxon(lineage.get(rank)))}</span>'
@@ -82,18 +90,55 @@ def _taxon_name(taxonomy: Taxonomy, taxid: str) -> str:
     return f"Taxid {taxid}"
 
 
-def _reference(hit: dict) -> str:
+def _segment(hit: dict, index: int) -> str:
+    coordinates = []
+    if hit.get("qstart") is not None and hit.get("qend") is not None:
+        coordinates.append(f'Query {hit["qstart"]}–{hit["qend"]}')
+    if hit.get("tstart") is not None and hit.get("tend") is not None:
+        coordinates.append(f'Ref {hit["tstart"]}–{hit["tend"]}')
+    bitscore = hit.get("segment_bitscore")
+    if bitscore is None:
+        bitscore = hit.get("bitscore")
+    details = [f"Alignment {index}", *coordinates]
+    if bitscore is not None:
+        details.append(f"{float(bitscore):.1f} bits")
+    if hit.get("segment_selected") is False:
+        details.append("excluded from combined score")
+    return (
+        '<div class="alignment-segment">'
+        f'<div class="segment-metrics">{_escape(" · ".join(details))}</div>'
+        f'{_alignment(hit.get("qaln"), hit.get("taln"))}'
+        "</div>"
+    )
+
+
+def _reference(reference_hits: Iterable[dict], lineage: Dict[str, str]) -> str:
+    segments = list(reference_hits)
+    hit = segments[0]
     identity = float(hit.get("pct_identity") or 0) * 100
     coverage = float(hit.get("query_coverage") or 0) * 100
     bitscore = float(hit.get("bitscore") or 0)
     evalue = hit.get("evalue")
     evalue_text = f"{float(evalue):.2g}" if evalue is not None else "n/a"
+    species = _display_taxon(lineage.get("species"))
+    subspecies = _display_taxon(lineage.get("subspecies"))
+    taxonomy_line = " · ".join(
+        part for part in (species, subspecies) if part and part != "unclassified"
+    ) or "unclassified"
+    segments.sort(
+        key=lambda segment: (
+            min(segment.get("qstart"), segment.get("qend"))
+            if segment.get("qstart") is not None and segment.get("qend") is not None
+            else float("inf")
+        )
+    )
     return (
         '<details class="reference-alignment">'
-        f'<summary><span>{_escape(hit.get("target"))}</span>'
+        f'<summary><span><span>{_escape(_display_reference(hit.get("target")))}</span>'
+        f'<span class="reference-taxonomy">{_escape(taxonomy_line)}</span></span>'
         f'<span class="metrics">{identity:.2f}% ANI · {coverage:.2f}% query · '
         f"{bitscore:.1f} bits · E {evalue_text}</span></summary>"
-        f'{_alignment(hit.get("qaln"), hit.get("taln"))}'
+        f'{"".join(_segment(segment, index) for index, segment in enumerate(segments, 1))}'
         "</details>"
     )
 
@@ -133,29 +178,27 @@ def _taxon_cards(
     cards = []
     for (taxid, bits), rank in zip(scored, ranks):
         taxon_hits = grouped[taxid]
+        reference_groups = defaultdict(list)
+        for hit in taxon_hits:
+            reference_groups[str(hit.get("target") or "unclassified")].append(hit)
         references = sorted(
-            taxon_hits, key=lambda hit: float(hit.get("bitscore") or 0), reverse=True
+            reference_groups.values(),
+            key=lambda hits: float(hits[0].get("bitscore") or 0),
+            reverse=True,
         )[:_MAX_REFERENCES]
         lineage = lineages[taxid]
-        species = _display_taxon(lineage.get("species"))
-        subspecies = _display_taxon(lineage.get("subspecies"))
         rank_label = _rank_label(rank)
         if ranks.count(rank) > 1:
             rank_label += " (tied)"
-
-        species_line = " · ".join(
-            part for part in (species, subspecies) if part and part != "unclassified"
-        ) or "unclassified"
 
         cards.append(
             '<article class="taxon-card">'
             '<header><div>'
             f'<h2>{_escape(_taxon_name(taxonomy, taxid))}</h2>'
             f'<span class="taxon-rank">{_escape(rank_label)}</span>'
-            f'<span class="ref-species">{_escape(species_line)}</span>'
             "</div>"
             f'<code>taxid:{_escape(taxid)}</code></header>'
-            f'{"".join(_reference(hit) for hit in references)}'
+            f'{"".join(_reference(hits, lineage) for hits in references)}'
             "</article>"
         )
     return "".join(cards) or '<div class="no-hits">No acceptable database hits</div>'
@@ -263,8 +306,8 @@ main{{max-width:1440px;margin:0 auto;padding:24px}}.query-page{{display:none}}.q
 .query-heading,.taxonomy-change,.taxon-card{{border:1px solid var(--ink);background:var(--panel)}}.query-heading{{display:flex;justify-content:space-between;align-items:end;padding:16px;margin-bottom:12px}}h1,h2{{margin:0}}h1{{font-size:20px}}h2{{font-size:14px}}.eyebrow{{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}}
 .taxonomy-change{{display:grid;grid-template-columns:1fr 42px 1fr;margin-bottom:16px}}.taxonomy-change>div:not(.arrow){{padding:16px}}.taxonomy-change h2{{margin-bottom:10px;text-transform:uppercase}}.arrow{{display:grid;place-items:center;border-left:1px solid var(--line);border-right:1px solid var(--line);font-size:22px}}
 .lineage{{display:flex;flex-wrap:wrap;gap:5px}}.lineage span{{border:1px solid var(--line);padding:3px 6px}}.decision{{display:inline-block;margin-top:10px;border:1px solid var(--accent);color:var(--accent);padding:2px 6px}}
-.taxa-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}}.taxon-card header{{display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid var(--ink);background:#e9eef0}}.taxon-card header div{{min-width:0}}.taxon-rank{{display:inline-block;margin-top:4px;margin-right:8px;border:1px solid var(--accent);color:var(--accent);padding:1px 5px;font-size:11px;text-transform:uppercase}}.ref-species{{display:block;color:var(--muted);font-size:12px;margin-top:4px}}
-.reference-alignment{{border-top:1px solid var(--line)}}.reference-alignment:first-of-type{{border-top:0}}summary{{display:flex;justify-content:space-between;gap:12px;padding:10px;cursor:pointer}}.metrics{{color:var(--muted);text-align:right}}
+.taxa-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}}.taxon-card header{{display:flex;justify-content:space-between;align-items:center;padding:12px;border-bottom:1px solid var(--ink);background:#e9eef0}}.taxon-card header div{{min-width:0}}.taxon-rank{{display:inline-block;margin-top:4px;margin-right:8px;border:1px solid var(--accent);color:var(--accent);padding:1px 5px;font-size:11px;text-transform:uppercase}}
+.reference-alignment{{border-top:1px solid var(--line)}}.reference-alignment:first-of-type{{border-top:0}}summary{{display:flex;justify-content:space-between;gap:12px;padding:10px;cursor:pointer}}.reference-taxonomy{{display:block;color:var(--muted);font-size:12px;margin-top:2px}}.metrics{{color:var(--muted);text-align:right}}.alignment-segment{{border-top:1px solid var(--line)}}.segment-metrics{{padding:6px 12px;color:var(--muted);font-size:11px;background:#f3f5f6}}
 .alignment{{overflow:auto;margin:0;padding:12px;border-top:1px solid var(--line);background:#111820;color:#e8f0f2;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}}.alignment-unavailable,.no-hits{{padding:18px;color:var(--muted)}}
 @media(max-width:850px){{.taxa-grid{{grid-template-columns:1fr}}.taxonomy-change{{grid-template-columns:1fr}}.arrow{{border:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:6px;transform:rotate(90deg)}}summary{{display:block}}.metrics{{display:block;text-align:left;margin-top:4px}}.nav-search input[type=search]{{width:160px}}}}
 </style>

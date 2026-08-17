@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 
 import polars as pl
 
+from .aligner import aggregate_hits
 from .io_esviritu import (
     RANK_PREFIXES,
     TAX_RANKS,
@@ -124,6 +125,7 @@ def resolve_assemblies(
     realign_ties: bool = False,
 ) -> Dict[str, AssemblyResolution]:
     """Resolve taxonomy for every Assembly present in ``info_df``."""
+    hits = aggregate_hits(hits)
     acc2asm = _accession_to_assembly(info_df)
     orig_tax = original_taxonomy(info_df)
     assemblies = list(orig_tax.keys())

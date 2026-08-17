@@ -10,7 +10,9 @@ import pytest
 
 from postviritu.taxonomy import Taxonomy
 
-_Row = namedtuple("Row", ["TaxID", "FullLineage", "FullLineageRanks"])
+_Row = namedtuple(
+    "Row", ["TaxID", "FullLineage", "FullLineageRanks", "Name", "Rank"]
+)
 
 
 class _FakeDF:
@@ -34,8 +36,12 @@ class FakePyTaxonkit:
         self.last_lineage_call = (list(ids), data_dir, threads)
         rows = []
         for taxid in ids:
-            names, ranks = self._lineage_rows.get(str(taxid), (float("nan"), float("nan")))
-            rows.append(_Row(int(taxid), names, ranks))
+            values = self._lineage_rows.get(
+                str(taxid), (float("nan"), float("nan"), None, None)
+            )
+            if len(values) == 2:
+                values = (*values, None, None)
+            rows.append(_Row(int(taxid), *values))
         return _FakeDF(rows)
 
     def lca(self, ids, skip_deleted=False, skip_unfound=False, data_dir=None, threads=None):
@@ -84,6 +90,44 @@ def test_esviritu_lineage_maps_acellular_root_to_kingdom(monkeypatch):
     assert lineage["family"] == "f__Adenoviridae"
     assert lineage["species"] == "s__Human mastadenovirus F"
     assert lineage["subspecies"] == "t__Human mastadenovirus F"
+
+
+def test_esviritu_lineage_uses_terminal_no_rank_below_species(monkeypatch):
+    fake = FakePyTaxonkit(
+        lineage_rows={
+            "999": (
+                "Viruses;Mastadenovirus;Human mastadenovirus F;Human adenovirus 41 isolate Tak",
+                "acellular root;genus;species;no rank",
+                "Human adenovirus 41 isolate Tak",
+                "no rank",
+            )
+        }
+    )
+    _patch(monkeypatch, fake)
+
+    lineage = Taxonomy().esviritu_lineage("999")
+
+    assert lineage["species"] == "s__Human mastadenovirus F"
+    assert lineage["subspecies"] == "t__Human adenovirus 41 isolate Tak"
+
+
+def test_esviritu_lineage_includes_terminal_strain_missing_from_full_lineage(monkeypatch):
+    fake = FakePyTaxonkit(
+        lineage_rows={
+            "999": (
+                "Viruses;Mastadenovirus;Human mastadenovirus F",
+                "acellular root;genus;species",
+                "Human adenovirus 41 strain Dugan",
+                "strain",
+            )
+        }
+    )
+    _patch(monkeypatch, fake)
+
+    lineage = Taxonomy().esviritu_lineage("999")
+
+    assert lineage["species"] == "s__Human mastadenovirus F"
+    assert lineage["subspecies"] == "t__Human adenovirus 41 strain Dugan"
 
 
 def test_esviritu_lineage_unknown_taxid_is_unclassified(monkeypatch):

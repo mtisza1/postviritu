@@ -19,10 +19,10 @@ def _write_blastn_tsv(path, fields, lines):
 def test_parse_blastn_strips_consensus_and_scales(tmp_path):
     out = tmp_path / "blastn.tsv"
     fields = BlastnAligner._FORMAT_FIELDS
-    # query target taxid pident length qlen qcovs evalue bitscore qseq sseq
+    # query target taxid pident length qlen qcovs evalue bitscore qseq sseq qstart qend sstart send
     lines = [
-        ["accA_consensus", "tgt1", "100", "99.0", "1000", "1000", "95.0", "1e-50", "500.0", "ACGT", "ACGT"],
-        ["accB_consensus", "tgt2", "200", "80.0", "900", "1000", "90.0", "1e-30", "300.0", "ACGA", "ACGT"],
+        ["accA_consensus", "tgt1", "100", "99.0", "1000", "1000", "95.0", "1e-50", "500.0", "ACGT", "ACGT", "1", "4", "1", "4"],
+        ["accB_consensus", "tgt2", "200", "80.0", "900", "1000", "90.0", "1e-30", "300.0", "ACGA", "ACGT", "1", "4", "1", "4"],
     ]
     _write_blastn_tsv(out, fields, lines)
     df = parse_blastn(str(out), fields)
@@ -51,7 +51,7 @@ def test_parse_blastn_nonN_metrics_exclude_query_N(tmp_path):
     out = tmp_path / "blastn.tsv"
     fields = BlastnAligner._FORMAT_FIELDS
     lines = [
-        ["accC_consensus", "tgt", "100", "50.0", "5", "20", "25.0", "1e-50", "500.0", "ACNGT", "ACAGT"],
+        ["accC_consensus", "tgt", "100", "50.0", "5", "20", "25.0", "1e-50", "500.0", "ACNGT", "ACAGT", "1", "5", "1", "5"],
     ]
     _write_blastn_tsv(out, fields, lines)
     df = parse_blastn(str(out), fields, query_nonN_len={"accC": 10})
@@ -66,7 +66,7 @@ def test_parse_blastn_multiple_staxids_takes_first(tmp_path):
     out = tmp_path / "blastn.tsv"
     fields = BlastnAligner._FORMAT_FIELDS
     lines = [
-        ["accD", "tgt", "100;200;300", "100.0", "4", "4", "100.0", "1e-50", "500.0", "ACGT", "ACGT"],
+        ["accD", "tgt", "100;200;300", "100.0", "4", "4", "100.0", "1e-50", "500.0", "ACGT", "ACGT", "1", "4", "1", "4"],
     ]
     _write_blastn_tsv(out, fields, lines)
     df = parse_blastn(str(out), fields)
@@ -108,7 +108,7 @@ with open(args.query) as fh:
 
 with open(args.out, "w") as fh:
     for name in records:
-        fh.write(f"{name}\\ttgt_{name}\\t100\\t100.0\\t4\\t4\\t100.0\\t1e-50\\t500.0\\tACGT\\tACGT\\n")
+        fh.write(f"{name}\\ttgt_{name}\\t100\\t100.0\\t4\\t4\\t100.0\\t1e-50\\t500.0\\tACGT\\tACGT\\t1\\t4\\t1\\t4\\n")
 
 if log:
     with open(log, "a") as fh:
@@ -165,8 +165,8 @@ with open(args.query) as fh:
             name = line[1:].split()[0]
 
 with open(args.out, "w") as fh:
-    fh.write(f"{name}\\ttgtA\\t100\\t100.0\\t4\\t4\\t100.0\\t1e-50\\t500.0\\tACGT\\tACGT\\n")
-    fh.write(f"{name}\\ttgtB\\t200\\t100.0\\t4\\t4\\t100.0\\t1e-50\\t500.0\\tACGT\\tACGT\\n")
+    fh.write(f"{name}\\ttgtA\\t100\\t100.0\\t4\\t4\\t100.0\\t1e-50\\t500.0\\tACGT\\tACGT\\t1\\t4\\t1\\t4\\n")
+    fh.write(f"{name}\\ttgtB\\t200\\t100.0\\t4\\t4\\t100.0\\t1e-50\\t500.0\\tACGT\\tACGT\\t1\\t4\\t1\\t4\\n")
 """
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
