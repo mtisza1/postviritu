@@ -9,6 +9,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from typing import List, Optional
 
@@ -92,6 +93,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="YAML file of taxa to include (default: process all).",
     )
+    p_run.add_argument(
+        "--vvsearch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Supplement viral subspecies with NCBI Virus Variation genotypes "
+        "(default: on). Use --no-vvsearch for a fully offline, deterministic "
+        "run.",
+    )
+    p_run.add_argument(
+        "--vvsearch-email",
+        default=None,
+        help="Contact email sent with vvsearch2 requests so NCBI can reach you "
+        "about a misbehaving client (recommended for large batches).",
+    )
+    p_run.add_argument(
+        "--vvsearch-timeout",
+        type=float,
+        default=10.0,
+        help="Per-request timeout in seconds for vvsearch2 (default: 10).",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     # blastn
@@ -163,9 +184,40 @@ def _build_parser() -> argparse.ArgumentParser:
         default=300,
         help="Maximum target sequences reported per query (default: 300).",
     )
+    p_blastn.add_argument(
+        "--vvsearch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Supplement viral subspecies with NCBI Virus Variation genotypes "
+        "(default: on). Use --no-vvsearch for a fully offline, deterministic "
+        "run.",
+    )
+    p_blastn.add_argument(
+        "--vvsearch-email",
+        default=None,
+        help="Contact email sent with vvsearch2 requests so NCBI can reach you "
+        "about a misbehaving client (recommended for large batches).",
+    )
+    p_blastn.add_argument(
+        "--vvsearch-timeout",
+        type=float,
+        default=10.0,
+        help="Per-request timeout in seconds for vvsearch2 (default: 10).",
+    )
     p_blastn.set_defaults(func=_cmd_blastn)
 
     return parser
+
+
+def _vvsearch_config(args: argparse.Namespace):
+    """Build the Virus Variation client policy from parsed CLI arguments."""
+    from .taxonomy import VVSearchConfig
+
+    return VVSearchConfig(
+        enabled=args.vvsearch,
+        email=args.vvsearch_email,
+        timeout=args.vvsearch_timeout,
+    )
 
 
 def _cmd_setup_db(args: argparse.Namespace) -> int:
@@ -195,7 +247,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     taxdump = args.taxdump or manifest.get("taxdump")
 
     aligner = Mmseqs2Aligner(target_db=target_db, mmseqs_bin=args.mmseqs_bin)
-    taxonomy = Taxonomy(data_dir=taxdump, threads=args.threads)
+    taxonomy = Taxonomy(
+        data_dir=taxdump, threads=args.threads, vvsearch=_vvsearch_config(args)
+    )
     taxa_filter = TaxaFilter.from_yaml(args.taxa_filter) if args.taxa_filter else None
     config = RunConfig(
         mode=args.mode,
@@ -232,7 +286,9 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
         max_target_seqs=args.max_target_seqs,
         batch_size=args.batch_size,
     )
-    taxonomy = Taxonomy(data_dir=args.taxdump, threads=args.threads)
+    taxonomy = Taxonomy(
+        data_dir=args.taxdump, threads=args.threads, vvsearch=_vvsearch_config(args)
+    )
     taxa_filter = TaxaFilter.from_yaml(args.taxa_filter) if args.taxa_filter else None
     config = RunConfig(
         mode=args.mode,
@@ -259,6 +315,9 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # Match the print-based convention used elsewhere so library warnings
+    # (e.g. abandoned genotype lookups) are not silently discarded.
+    logging.basicConfig(level=logging.INFO, format="[postviritu] %(message)s")
     parser = _build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
