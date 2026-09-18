@@ -188,6 +188,30 @@ def test_disagree_keeps_original_when_agree():
     assert a.lineage["subspecies"] == "t__strain"
 
 
+def test_disagree_agreement_uses_vvsearch_genotype():
+    info = pl.DataFrame(
+        [_info_row("accA1", "asmA", "s__Human mastadenovirus F", "t__strain")]
+    )
+    hits = make_hits(
+        [
+            {
+                "query": "accA1", "target": "tgtA", "taxid": "100",
+                "pct_identity": 0.99, "aln_length": 1000, "query_length": 1000,
+                "query_coverage": 0.95, "evalue": 1e-50, "bitscore": 500.0,
+            }
+        ]
+    )
+    taxonomy = _taxonomy()
+    taxonomy.genotype_table["tgtA"] = "GII.4"
+
+    resolution = resolve_assemblies(
+        hits, info, taxonomy, mode=MODE_DISAGREE
+    )["asmA"]
+
+    assert resolution.decision == "kept_original"
+    assert resolution.lineage["subspecies"] == "t__GII.4"
+
+
 def test_disagree_no_hit_keeps_original():
     res = resolve_assemblies(
         make_hits([]), _info_df(), _taxonomy(), mode=MODE_DISAGREE

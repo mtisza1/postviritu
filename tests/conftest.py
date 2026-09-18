@@ -111,15 +111,19 @@ class FakeTaxonomy:
     frozenset of taxids -> taxid for deterministic LCA results.
     """
 
-    def __init__(self, rank_table=None, lca_table=None):
+    def __init__(self, rank_table=None, lca_table=None, genotype_table=None):
         self.rank_table = rank_table or {}
         self.lca_table = lca_table or {}
+        self.genotype_table = genotype_table or {}
 
-    def esviritu_lineage(self, taxid):
+    def esviritu_lineage(self, taxid, accession=None):
         rmap = self.rank_table.get(taxid)
         if not rmap:
             return unclassified_lineage()
-        return map_ranks_to_esviritu(rmap)
+        lineage = map_ranks_to_esviritu(rmap)
+        if accession in self.genotype_table:
+            lineage["subspecies"] = "t__" + self.genotype_table[accession]
+        return lineage
 
     def lca(self, taxids):
         clean = [t for t in dict.fromkeys(taxids) if t and t != "0"]

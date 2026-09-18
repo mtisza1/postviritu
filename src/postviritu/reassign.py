@@ -251,7 +251,16 @@ def _resolve_with_hits(
         if not decision:
             decision = "assigned" if mode == MODE_SCRATCH else "single_taxon"
 
-    lineage = taxonomy.esviritu_lineage(assigned_taxid) if assigned_taxid else unclassified_lineage()
+    taxdump_lineage = (
+        taxonomy.esviritu_lineage(assigned_taxid)
+        if assigned_taxid
+        else unclassified_lineage()
+    )
+    lineage = taxdump_lineage
+    genotype_applied = False
+    if assigned_taxid and not ambiguous:
+        lineage = taxonomy.esviritu_lineage(assigned_taxid, accession=top["target"])
+        genotype_applied = lineage.get("subspecies") != taxdump_lineage.get("subspecies")
 
     # Decide whether to override EsViritu in disagree mode.
     if mode == MODE_DISAGREE and not ambiguous:
@@ -259,8 +268,11 @@ def _resolve_with_hits(
         if new_species and orig_species and new_species != orig_species:
             decision = "overridden"
         else:
-            # Agrees (or can't tell) -> keep EsViritu's lineage unchanged.
+            # Keep EsViritu's lineage, supplemented by a Virus Variation genotype.
+            enriched_subspecies = lineage.get("subspecies")
             lineage = {r: orig.get(r) for r in TAX_RANKS}
+            if genotype_applied:
+                lineage["subspecies"] = enriched_subspecies
             decision = "kept_original"
 
     # NOTE: ``lineage`` here is the *raw* lineage used for info/assembly_summary.

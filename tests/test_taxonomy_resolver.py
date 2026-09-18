@@ -7,6 +7,7 @@ These avoid needing the taxonkit binary / pytaxonkit installed by monkeypatching
 from collections import namedtuple
 
 import pytest
+import requests
 
 from postviritu.taxonomy import Taxonomy
 
@@ -175,3 +176,104 @@ def test_lca_invalid_returns_none(monkeypatch):
     _patch(monkeypatch, fake)
     tax = Taxonomy()
     assert tax.lca(["1", "2"]) is None
+
+
+class _VVResponse:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"response": {"docs": self.docs}}
+
+
+def test_virus_lineage_uses_vvsearch_genotype_and_caches_accession(monkeypatch):
+    fake = FakePyTaxonkit(
+        lineage_rows={
+            "999": (
+                "Viruses;Orthopoxvirus;Monkeypox virus",
+                "acellular root;genus;species",
+            )
+        }
+    )
+    _patch(monkeypatch, fake)
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        return _VVResponse([{"AccVer_s": "XCI56374.1", "Genotype_s": "IIb"}])
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", get)
+    tax = Taxonomy()
+
+    lineage = tax.esviritu_lineage("999", "gi|123|ref|XCI56374.1|")
+    tax.esviritu_lineage("999", "XCI56374.1")
+
+    assert lineage["subspecies"] == "t__IIb"
+    assert len(calls) == 1
+    assert calls[0][1]["params"]["q"] == 'AccVer_s:"XCI56374.1"'
+    assert calls[0][1]["params"]["fq"] == 'SeqType_s:("Nucleotide")'
+
+
+def test_vvsearch_empty_genotype_falls_back_to_taxdump(monkeypatch):
+    fake = FakePyTaxonkit(
+        lineage_rows={
+            "999": (
+                "Viruses;Mastadenovirus;Human mastadenovirus F",
+                "acellular root;genus;species",
+            )
+        }
+    )
+    _patch(monkeypatch, fake)
+    monkeypatch.setattr(
+        "postviritu.taxonomy.requests.get",
+        lambda *args, **kwargs: _VVResponse([{"AccVer_s": "NC_001405.1"}]),
+    )
+
+    lineage = Taxonomy().esviritu_lineage("999", "NC_001405.1")
+
+    assert lineage["subspecies"] == "t__Human mastadenovirus F"
+
+
+def test_vvsearch_failure_falls_back_to_taxdump(monkeypatch):
+    fake = FakePyTaxonkit(
+        lineage_rows={
+            "999": (
+                "Viruses;Mastadenovirus;Human mastadenovirus F",
+                "acellular root;genus;species",
+            )
+        }
+    )
+    _patch(monkeypatch, fake)
+
+    def timeout(*args, **kwargs):
+        raise requests.Timeout("unavailable")
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", timeout)
+
+    lineage = Taxonomy().esviritu_lineage("999", "NC_001405.1")
+
+    assert lineage["subspecies"] == "t__Human mastadenovirus F"
+
+
+def test_nonvirus_lineage_does_not_query_vvsearch(monkeypatch):
+    fake = FakePyTaxonkit(
+        lineage_rows={
+            "999": (
+                "Eukaryota;Chordata;Homo sapiens",
+                "superkingdom;phylum;species",
+            )
+        }
+    )
+    _patch(monkeypatch, fake)
+
+    def unexpected_request(*args, **kwargs):
+        raise AssertionError("vvsearch2 should only be queried for viruses")
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", unexpected_request)
+
+    lineage = Taxonomy().esviritu_lineage("999", "NC_000001.11")
+
+    assert lineage["kingdom"] == "k__Eukaryota"

@@ -11,6 +11,7 @@ dependencies:
   - blast
   - taxonkit>=0.15
   - pytaxonkit>=0.10
+  - requests>=2.0
   - numpy
   - pip
   - pip:

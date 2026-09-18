@@ -3,8 +3,9 @@
 `postviritu` is a Python CLI that post-processes [EsViritu](https://github.com/cmmr/EsViritu)
 output. It re-aligns EsViritu's reconstructed consensus genomes against a large
 NCBI nucleotide database (e.g. `core_nt`) using `mmseqs2`, re-derives taxonomy
-from the NCBI taxonomy (via `taxonkit`), and rewrites EsViritu-format output
-tables.
+from the NCBI taxonomy (via `taxonkit`), supplements viral subspecies with
+NCBI Virus Variation genotypes when available, and rewrites EsViritu-format
+output tables.
 
 ## Why
 
@@ -96,6 +97,11 @@ hits are reported per query.
 - `--mode disagree`: keep EsViritu's call unless the top database hit clearly
   disagrees (override) or the best hits tie across taxa (assign the LCA and flag
   ambiguity).
+
+For viral database hits, `postviritu` queries NCBI Virus Variation `vvsearch2`
+by reference accession and uses a non-empty `Genotype` as the subspecies. If no
+genotype is available or the request fails, the taxdump-derived subspecies is
+kept. Non-viral hits are not queried.
 
 ### Key options
 

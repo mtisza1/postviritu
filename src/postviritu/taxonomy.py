@@ -15,9 +15,11 @@ pandas DataFrames.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Dict, List, Optional, Sequence
 
+import requests
 import yaml
 
 from .io_esviritu import RANK_PREFIXES, TAX_RANKS
@@ -43,6 +45,20 @@ _NCBI_RANK_SOURCES = {
 }
 
 _DEFAULT_ROOT = "Viruses"
+_VVSEARCH_URL = "https://www.ncbi.nlm.nih.gov/genomes/VirusVariation/vvsearch2/"
+_ACCESSION_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _normalize_accession(value: str) -> Optional[str]:
+    """Extract an accession.version from a database sequence identifier."""
+    text = str(value).split(maxsplit=1)[0]
+    parts = text.split("|")
+    if len(parts) >= 4 and parts[0].lower() == "gi" and parts[1].isdigit():
+        text = parts[3]
+    elif len(parts) >= 2 and parts[0].lower() in {"gb", "emb", "dbj", "ref"}:
+        text = parts[1]
+    text = text.strip("|")
+    return text if _ACCESSION_PATTERN.fullmatch(text) else None
 
 
 def map_ranks_to_esviritu(
@@ -107,6 +123,7 @@ class Taxonomy:
         self.data_dir = data_dir
         self.threads = threads
         self._lineage_cache: Dict[str, Dict[str, str]] = {}
+        self._genotype_cache: Dict[str, Optional[str]] = {}
 
     @staticmethod
     def _pytaxonkit():
@@ -161,12 +178,45 @@ class Taxonomy:
                 rank_map[terminal_rank] = terminal_name
         return rank_map
 
-    def esviritu_lineage(self, taxid: str) -> Dict[str, str]:
-        """Return the 8-rank EsViritu lineage for a single taxid."""
+    def _vvsearch_genotype(self, accession: str) -> Optional[str]:
+        accession = _normalize_accession(accession)
+        if not accession:
+            return None
+        if accession not in self._genotype_cache:
+            try:
+                response = requests.get(
+                    _VVSEARCH_URL,
+                    params={
+                        "fq": 'SeqType_s:("Nucleotide")',
+                        "q": f'AccVer_s:"{accession}"',
+                        "fl": "AccVer_s,Genotype_s",
+                        "wt": "json",
+                        "rows": 1,
+                    },
+                    timeout=30,
+                )
+                response.raise_for_status()
+                docs = response.json()["response"]["docs"]
+                value = docs[0].get("Genotype_s") if docs else None
+                genotype = str(value).strip() if value is not None else ""
+                self._genotype_cache[accession] = genotype or None
+            except (requests.RequestException, ValueError, TypeError, KeyError):
+                self._genotype_cache[accession] = None
+        return self._genotype_cache[accession]
+
+    def esviritu_lineage(
+        self, taxid: str, accession: Optional[str] = None
+    ) -> Dict[str, str]:
+        """Return the 8-rank EsViritu lineage for a taxid and optional accession."""
         rmap = self.rank_maps([taxid]).get(str(taxid), {})
         if not rmap:
             return unclassified_lineage()
-        return map_ranks_to_esviritu(rmap)
+        lineage = map_ranks_to_esviritu(rmap)
+        if accession and lineage["kingdom"].removeprefix("k__").casefold() == "viruses":
+            genotype = self._vvsearch_genotype(accession)
+            if genotype:
+                lineage["subspecies"] = RANK_PREFIXES["subspecies"] + genotype
+        return lineage
 
     def lca(self, taxids: Sequence[str]) -> Optional[str]:
         """Compute the lowest common ancestor taxid via ``pytaxonkit.lca``."""
