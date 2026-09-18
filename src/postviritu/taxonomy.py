@@ -15,14 +15,20 @@ pandas DataFrames.
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from collections.abc import Mapping
-from typing import Dict, List, Optional, Sequence
+from dataclasses import asdict, dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import requests
 import yaml
 
+from . import __version__
 from .io_esviritu import RANK_PREFIXES, TAX_RANKS
+
+logger = logging.getLogger(__name__)
 
 # Map each EsViritu rank to the NCBI rank name(s) that fill it, in priority order.
 # The "kingdom" slot prefers the virus top-level rank ("Viruses"); newer NCBI
@@ -45,20 +51,98 @@ _NCBI_RANK_SOURCES = {
 }
 
 _DEFAULT_ROOT = "Viruses"
+
+# ``vvsearch2`` is the Solr backend behind the NCBI Virus Variation web UI. It
+# is not a versioned E-utilities endpoint and carries no stability contract, so
+# every lookup is treated as best-effort: failures degrade to taxdump-derived
+# taxonomy and are counted (see :class:`VVSearchStats`) rather than swallowed.
 _VVSEARCH_URL = "https://www.ncbi.nlm.nih.gov/genomes/VirusVariation/vvsearch2/"
 _ACCESSION_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
+_WHITESPACE_RUN = re.compile(r"\s+")
 
 
-def _normalize_accession(value: str) -> Optional[str]:
-    """Extract an accession.version from a database sequence identifier."""
-    text = str(value).split(maxsplit=1)[0]
-    parts = text.split("|")
-    if len(parts) >= 4 and parts[0].lower() == "gi" and parts[1].isdigit():
-        text = parts[3]
-    elif len(parts) >= 2 and parts[0].lower() in {"gb", "emb", "dbj", "ref"}:
-        text = parts[1]
+@dataclass
+class VVSearchConfig:
+    """Client policy for NCBI Virus Variation ``vvsearch2`` lookups.
+
+    ``enabled=False`` makes the pipeline fully offline and deterministic. The
+    rate limit and identification fields follow NCBI's usage guidance (no more
+    than 3 requests/second, and identify the client).
+    """
+
+    enabled: bool = True
+    timeout: float = 10.0
+    min_interval: float = 0.34  # NCBI asks for <= 3 requests/second.
+    max_attempts: int = 3  # Per accession, within one lookup.
+    backoff: float = 1.0  # Seconds; doubled after each failed attempt.
+    max_consecutive_failures: int = 5  # Then stop querying for the whole run.
+    tool: str = "postviritu"
+    email: Optional[str] = None
+
+
+@dataclass
+class VVSearchStats:
+    """Tally of what the genotype lookups actually did during a run.
+
+    Without this, an air-gapped run and a run where NCBI genuinely has no
+    genotypes produce identical output, which makes the enrichment step
+    impossible to audit after the fact.
+    """
+
+    attempted: int = 0  # Accessions we sent at least one request for.
+    genotyped: int = 0  # Answered with a usable genotype.
+    empty: int = 0  # Answered, but no genotype recorded.
+    failed: int = 0  # Exhausted all attempts.
+    skipped: int = 0  # Never attempted (disabled, circuit open, unparseable).
+    circuit_open: bool = False  # Lookups abandoned after repeated failures.
+
+    def as_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+    def summary(self) -> str:
+        """One-line, human-readable provenance for the run log."""
+        parts = [
+            f"{self.attempted} queried",
+            f"{self.genotyped} genotyped",
+            f"{self.empty} without genotype",
+            f"{self.failed} failed",
+            f"{self.skipped} skipped",
+        ]
+        text = "vvsearch2 genotype lookups: " + ", ".join(parts)
+        if self.circuit_open:
+            text += " (abandoned early after repeated failures)"
+        return text
+
+
+def _normalize_accession(value) -> Optional[str]:
+    """Extract an accession.version from a database sequence identifier.
+
+    Returns ``None`` for anything that does not look like an accession, so a
+    malformed identifier degrades to "no genotype" instead of raising.
+    """
+    parts = str(value).split(maxsplit=1)
+    if not parts:  # Empty or whitespace-only identifier.
+        return None
+    text = parts[0]
+    fields = text.split("|")
+    if len(fields) >= 4 and fields[0].lower() == "gi" and fields[1].isdigit():
+        text = fields[3]
+    elif len(fields) >= 2 and fields[0].lower() in {"gb", "emb", "dbj", "ref"}:
+        text = fields[1]
     text = text.strip("|")
     return text if _ACCESSION_PATTERN.fullmatch(text) else None
+
+
+def _sanitize_genotype(value) -> Optional[str]:
+    """Collapse whitespace in an external genotype string, or return None.
+
+    ``Genotype_s`` is untrusted external text that lands in a TSV cell, so any
+    embedded tab or newline has to be neutralised before it reaches output.
+    """
+    if value is None:
+        return None
+    text = _WHITESPACE_RUN.sub(" ", str(value)).strip()
+    return text or None
 
 
 def map_ranks_to_esviritu(
@@ -119,11 +203,24 @@ def _is_missing(value) -> bool:
 class Taxonomy:
     """Resolve taxids to lineages and compute LCAs using pytaxonkit (>= 0.10)."""
 
-    def __init__(self, data_dir: Optional[str] = None, threads: Optional[int] = None):
+    def __init__(
+        self,
+        data_dir: Optional[str] = None,
+        threads: Optional[int] = None,
+        vvsearch: Optional[VVSearchConfig] = None,
+    ):
         self.data_dir = data_dir
         self.threads = threads
+        self.vvsearch = vvsearch if vvsearch is not None else VVSearchConfig()
+        self.vvsearch_stats = VVSearchStats()
         self._lineage_cache: Dict[str, Dict[str, str]] = {}
+        # Successful answers only. A transient failure must never be cached as
+        # a negative, or it becomes indistinguishable from "no genotype exists"
+        # for the rest of the run.
         self._genotype_cache: Dict[str, Optional[str]] = {}
+        self._consecutive_failures = 0
+        self._circuit_open = False
+        self._last_request_at: Optional[float] = None
 
     @staticmethod
     def _pytaxonkit():
@@ -178,42 +275,134 @@ class Taxonomy:
                 rank_map[terminal_rank] = terminal_name
         return rank_map
 
-    def _vvsearch_genotype(self, accession: str) -> Optional[str]:
-        accession = _normalize_accession(accession)
-        if not accession:
-            return None
-        if accession not in self._genotype_cache:
+    def _throttle(self) -> None:
+        """Space requests out to honour the configured rate limit."""
+        interval = self.vvsearch.min_interval
+        if interval > 0 and self._last_request_at is not None:
+            elapsed = time.monotonic() - self._last_request_at
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+        self._last_request_at = time.monotonic()
+
+    def _vvsearch_request(self, accession: str) -> Tuple[Optional[str], bool]:
+        """Query vvsearch2 for one accession.
+
+        Returns ``(genotype, answered)``. ``answered`` is False when every
+        attempt failed, which the caller must not confuse with an authoritative
+        "this reference has no genotype" (``(None, True)``).
+        """
+        cfg = self.vvsearch
+        params = {
+            "fq": 'SeqType_s:("Nucleotide")',
+            "q": f'AccVer_s:"{accession}"',
+            "fl": "AccVer_s,Genotype_s",
+            "wt": "json",
+            "rows": 1,
+        }
+        # NCBI asks callers to identify themselves so they can contact the
+        # owner of a misbehaving client instead of blocking it outright.
+        if cfg.tool:
+            params["tool"] = cfg.tool
+        if cfg.email:
+            params["email"] = cfg.email
+        headers = {"User-Agent": f"{cfg.tool or 'postviritu'}/{__version__}"}
+
+        delay = cfg.backoff
+        for attempt in range(1, max(1, cfg.max_attempts) + 1):
+            self._throttle()
             try:
                 response = requests.get(
-                    _VVSEARCH_URL,
-                    params={
-                        "fq": 'SeqType_s:("Nucleotide")',
-                        "q": f'AccVer_s:"{accession}"',
-                        "fl": "AccVer_s,Genotype_s",
-                        "wt": "json",
-                        "rows": 1,
-                    },
-                    timeout=30,
+                    _VVSEARCH_URL, params=params, headers=headers, timeout=cfg.timeout
                 )
                 response.raise_for_status()
                 docs = response.json()["response"]["docs"]
                 value = docs[0].get("Genotype_s") if docs else None
-                genotype = str(value).strip() if value is not None else ""
-                self._genotype_cache[accession] = genotype or None
-            except (requests.RequestException, ValueError, TypeError, KeyError):
-                self._genotype_cache[accession] = None
-        return self._genotype_cache[accession]
+                return _sanitize_genotype(value), True
+            except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+                logger.debug(
+                    "vvsearch2 lookup for %s failed (attempt %d/%d): %s",
+                    accession,
+                    attempt,
+                    cfg.max_attempts,
+                    exc,
+                )
+                if attempt < cfg.max_attempts:
+                    if delay > 0:
+                        time.sleep(delay)
+                    delay *= 2
+        return None, False
+
+    def _vvsearch_genotype(
+        self, accession: str, allow_lookup: bool = True
+    ) -> Optional[str]:
+        """Return the Virus Variation genotype for a reference accession.
+
+        Always degrades to ``None`` rather than raising: the genotype is a
+        supplement to taxdump-derived taxonomy, never a prerequisite for it.
+        With ``allow_lookup=False`` only the cache is consulted, so read-only
+        consumers cannot introduce a genotype that the reassignment step
+        declined to ask for.
+        """
+        acc = _normalize_accession(accession)
+        if acc is None:
+            if allow_lookup:
+                self.vvsearch_stats.skipped += 1
+            return None
+        if acc in self._genotype_cache:
+            return self._genotype_cache[acc]
+        if not allow_lookup:
+            return None
+        if not self.vvsearch.enabled or self._circuit_open:
+            self.vvsearch_stats.skipped += 1
+            return None
+
+        self.vvsearch_stats.attempted += 1
+        genotype, answered = self._vvsearch_request(acc)
+        if not answered:
+            self.vvsearch_stats.failed += 1
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self.vvsearch.max_consecutive_failures:
+                # Offline or blocked: stop paying the timeout on every
+                # remaining reference and say so once.
+                self._circuit_open = True
+                self.vvsearch_stats.circuit_open = True
+                logger.warning(
+                    "Abandoning vvsearch2 genotype lookups after %d consecutive "
+                    "failures; remaining assemblies keep taxdump-derived "
+                    "subspecies. Use --no-vvsearch to make this explicit.",
+                    self._consecutive_failures,
+                )
+            return None
+
+        self._consecutive_failures = 0
+        self._genotype_cache[acc] = genotype
+        if genotype:
+            self.vvsearch_stats.genotyped += 1
+        else:
+            self.vvsearch_stats.empty += 1
+        return genotype
 
     def esviritu_lineage(
-        self, taxid: str, accession: Optional[str] = None
+        self,
+        taxid: str,
+        accession: Optional[str] = None,
+        allow_lookup: bool = True,
     ) -> Dict[str, str]:
-        """Return the 8-rank EsViritu lineage for a taxid and optional accession."""
+        """Return the 8-rank EsViritu lineage for a taxid and optional accession.
+
+        Passing ``accession`` supplements the subspecies slot with a Virus
+        Variation genotype for viral taxa. ``allow_lookup=False`` restricts
+        that to genotypes already resolved during this run, which is what
+        read-only consumers (such as the HTML report) want: it keeps them
+        consistent with the output tables and free of network traffic.
+        """
         rmap = self.rank_maps([taxid]).get(str(taxid), {})
         if not rmap:
             return unclassified_lineage()
         lineage = map_ranks_to_esviritu(rmap)
-        if accession and lineage["kingdom"].removeprefix("k__").casefold() == "viruses":
-            genotype = self._vvsearch_genotype(accession)
+        kingdom = lineage["kingdom"].removeprefix(RANK_PREFIXES["kingdom"])
+        if accession and kingdom.casefold() == _DEFAULT_ROOT.casefold():
+            genotype = self._vvsearch_genotype(accession, allow_lookup=allow_lookup)
             if genotype:
                 lineage["subspecies"] = RANK_PREFIXES["subspecies"] + genotype
         return lineage

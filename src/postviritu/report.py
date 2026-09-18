@@ -81,8 +81,8 @@ def _alignment(qaln: Optional[str], taln: Optional[str], width: int = 60) -> str
     return f'<pre class="alignment">{content}</pre>'
 
 
-def _taxon_name(taxonomy: Taxonomy, taxid: str) -> str:
-    lineage = taxonomy.esviritu_lineage(taxid)
+def _taxon_name(taxonomy: Taxonomy, taxid: str, accession: Optional[str] = None) -> str:
+    lineage = taxonomy.esviritu_lineage(taxid, accession=accession, allow_lookup=False)
     for rank in reversed(TAX_RANKS):
         value = lineage.get(rank)
         if value and _display_taxon(value) != "unclassified":
@@ -173,7 +173,22 @@ def _taxon_cards(
             ranks.append(ranks[-1] + 1)
         prev_bits = bits
 
-    lineages = {taxid: taxonomy.esviritu_lineage(taxid) for taxid, _ in scored}
+    # The accession of each taxon's best-scoring reference, so the report names
+    # taxa the same way the output tables do. ``allow_lookup=False`` keeps the
+    # report a pure view of decisions reassignment already made: it reuses a
+    # genotype that was resolved for this run and never requests a new one.
+    best_accession = {
+        taxid: max(grouped[taxid], key=lambda hit: float(hit.get("bitscore") or 0)).get(
+            "target"
+        )
+        for taxid, _ in scored
+    }
+    lineages = {
+        taxid: taxonomy.esviritu_lineage(
+            taxid, accession=best_accession.get(taxid), allow_lookup=False
+        )
+        for taxid, _ in scored
+    }
 
     cards = []
     for (taxid, bits), rank in zip(scored, ranks):
@@ -194,7 +209,7 @@ def _taxon_cards(
         cards.append(
             '<article class="taxon-card">'
             '<header><div>'
-            f'<h2>{_escape(_taxon_name(taxonomy, taxid))}</h2>'
+            f'<h2>{_escape(_taxon_name(taxonomy, taxid, best_accession.get(taxid)))}</h2>'
             f'<span class="taxon-rank">{_escape(rank_label)}</span>'
             "</div>"
             f'<code>taxid:{_escape(taxid)}</code></header>'

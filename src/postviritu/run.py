@@ -227,4 +227,24 @@ def run_batch(
             processed.append(sample.prefix)
         except FileNotFoundError as e:
             print(f"[postviritu] skipping {sample.prefix}: {e}")
+    _report_vvsearch_stats(taxonomy)
     return processed
+
+
+def _report_vvsearch_stats(taxonomy: Taxonomy) -> None:
+    """Log what the genotype lookups did, so a silent no-op is visible.
+
+    Without this line a run with no network and a run where NCBI simply holds
+    no genotypes produce identical tables.
+    """
+    stats = getattr(taxonomy, "vvsearch_stats", None)
+    if stats is None:
+        return
+    if not (stats.attempted or stats.skipped):
+        return
+    print(f"[postviritu] {stats.summary()}")
+    if stats.failed:
+        print(
+            "[postviritu] warning: some genotype lookups failed; the affected "
+            "assemblies kept taxdump-derived subspecies"
+        )

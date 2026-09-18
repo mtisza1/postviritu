@@ -98,10 +98,32 @@ hits are reported per query.
   disagrees (override) or the best hits tie across taxa (assign the LCA and flag
   ambiguity).
 
+### Genotype enrichment (network)
+
 For viral database hits, `postviritu` queries NCBI Virus Variation `vvsearch2`
-by reference accession and uses a non-empty `Genotype` as the subspecies. If no
-genotype is available or the request fails, the taxdump-derived subspecies is
-kept. Non-viral hits are not queried.
+by reference accession and uses a non-empty `Genotype` as the subspecies. A
+lookup is only made when the assignment is already a subspecies-level claim,
+that is when it is unambiguous (not an LCA) and the hit identity is at or above
+EsViritu's subspecies threshold. Non-viral hits are never queried, and results
+are cached per accession for the run.
+
+If no genotype is available, the taxdump-derived subspecies is kept. Failed
+requests are retried with backoff and are *not* cached as "no genotype"; after
+repeated consecutive failures the lookups are abandoned for the rest of the run
+and a warning is emitted. Every run prints a tally of what the lookups did, for
+example:
+
+```
+[postviritu] vvsearch2 genotype lookups: 42 queried, 17 genotyped, 25 without genotype, 0 failed, 0 skipped
+```
+
+This step is the only part of the pipeline that touches the network, and
+`vvsearch2` is the backend of the NCBI Virus Variation web UI rather than a
+versioned E-utilities endpoint. Because it makes results depend on a live
+service, pass `--no-vvsearch` for a fully offline, deterministic run (for
+example on an air-gapped compute node, or when reproducing an earlier
+analysis). Requests are rate-limited to NCBI's guidance of 3 per second;
+supplying `--vvsearch-email` is recommended for large batches.
 
 ### Key options
 
@@ -114,6 +136,9 @@ kept. Non-viral hits are not queried.
 | `--threads` | `1` | Threads for mmseqs2 |
 | `--keep-temp` | off | Keep intermediate files |
 | `--taxa-filter` | off | YAML file of taxa to include (see below) |
+| `--vvsearch` / `--no-vvsearch` | on | Supplement viral subspecies with NCBI genotypes |
+| `--vvsearch-email` | none | Contact address sent with `vvsearch2` requests |
+| `--vvsearch-timeout` | `10` | Per-request timeout in seconds |
 
 ### Process only selected taxa
 

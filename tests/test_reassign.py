@@ -261,3 +261,90 @@ def test_disagree_realign_tie_detected():
     a = res["asmA"]
     assert a.ambiguous is True
     assert a.decision == "lca_ambiguous_realigned"
+
+
+def _hit(query="accA1", target="tgtA", taxid="100", identity=0.99, bitscore=500.0):
+    return {
+        "query": query,
+        "target": target,
+        "taxid": taxid,
+        "pct_identity": identity,
+        "aln_length": 1000,
+        "query_length": 1000,
+        "query_coverage": 0.95,
+        "evalue": 1e-50,
+        "bitscore": bitscore,
+    }
+
+
+def test_disagree_override_carries_genotype():
+    """An overridden call keeps the enriched subspecies, not just the agreeing one."""
+    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
+    taxonomy = _taxonomy()
+    taxonomy.genotype_table["tgtA"] = "F41"
+
+    resolution = resolve_assemblies(
+        make_hits([_hit()]), info, taxonomy, mode=MODE_DISAGREE
+    )["asmA"]
+
+    assert resolution.decision == "overridden"
+    assert resolution.lineage["species"] == "s__Human mastadenovirus F"
+    assert resolution.lineage["subspecies"] == "t__F41"
+
+
+def test_ambiguous_lca_skips_genotype_lookup():
+    """An LCA call is not a subspecies-level claim, so no genotype is fetched."""
+    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
+    taxonomy = _taxonomy()
+    taxonomy.genotype_table["tgtA"] = "F41"
+
+    resolution = resolve_assemblies(
+        make_hits(
+            [
+                _hit(target="tgtA", taxid="200", bitscore=500.0),
+                _hit(target="tgtB", taxid="300", bitscore=499.0),
+            ]
+        ),
+        info,
+        taxonomy,
+        mode=MODE_SCRATCH,
+    )["asmA"]
+
+    assert resolution.ambiguous is True
+    assert resolution.lineage["subspecies"] != "t__F41"
+    assert taxonomy.genotype_queries == []
+
+
+def test_low_identity_skips_genotype_lookup():
+    """Below subspthresh no subspecies is asserted, so no request is spent."""
+    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
+    taxonomy = _taxonomy()
+    taxonomy.genotype_table["tgtA"] = "F41"
+
+    resolution = resolve_assemblies(
+        make_hits([_hit(identity=0.92)]),
+        info,
+        taxonomy,
+        mode=MODE_SCRATCH,
+        subspthresh=0.95,
+    )["asmA"]
+
+    assert resolution.lineage["subspecies"] != "t__F41"
+    assert taxonomy.genotype_queries == []
+
+
+def test_identity_at_threshold_performs_genotype_lookup():
+    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
+    taxonomy = _taxonomy()
+    taxonomy.genotype_table["tgtA"] = "F41"
+
+    resolution = resolve_assemblies(
+        make_hits([_hit(identity=0.95)]),
+        info,
+        taxonomy,
+        mode=MODE_SCRATCH,
+        subspthresh=0.95,
+    )["asmA"]
+
+    assert resolution.lineage["subspecies"] == "t__F41"
+    assert taxonomy.genotype_queries == ["tgtA"]

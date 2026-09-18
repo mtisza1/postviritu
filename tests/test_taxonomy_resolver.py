@@ -9,7 +9,14 @@ from collections import namedtuple
 import pytest
 import requests
 
-from postviritu.taxonomy import Taxonomy
+from postviritu.taxonomy import Taxonomy, VVSearchConfig
+
+
+def _fast(**overrides):
+    """A vvsearch policy with the waiting removed, for fast tests."""
+    defaults = {"min_interval": 0.0, "backoff": 0.0}
+    defaults.update(overrides)
+    return VVSearchConfig(**defaults)
 
 _Row = namedtuple(
     "Row", ["TaxID", "FullLineage", "FullLineageRanks", "Name", "Rank"]
@@ -203,17 +210,17 @@ def test_virus_lineage_uses_vvsearch_genotype_and_caches_accession(monkeypatch):
 
     def get(url, **kwargs):
         calls.append((url, kwargs))
-        return _VVResponse([{"AccVer_s": "XCI56374.1", "Genotype_s": "IIb"}])
+        return _VVResponse([{"AccVer_s": "MT903344.1", "Genotype_s": "IIb"}])
 
     monkeypatch.setattr("postviritu.taxonomy.requests.get", get)
-    tax = Taxonomy()
+    tax = Taxonomy(vvsearch=_fast())
 
-    lineage = tax.esviritu_lineage("999", "gi|123|ref|XCI56374.1|")
-    tax.esviritu_lineage("999", "XCI56374.1")
+    lineage = tax.esviritu_lineage("999", "gi|123|ref|MT903344.1|")
+    tax.esviritu_lineage("999", "MT903344.1")
 
     assert lineage["subspecies"] == "t__IIb"
     assert len(calls) == 1
-    assert calls[0][1]["params"]["q"] == 'AccVer_s:"XCI56374.1"'
+    assert calls[0][1]["params"]["q"] == 'AccVer_s:"MT903344.1"'
     assert calls[0][1]["params"]["fq"] == 'SeqType_s:("Nucleotide")'
 
 
@@ -232,7 +239,7 @@ def test_vvsearch_empty_genotype_falls_back_to_taxdump(monkeypatch):
         lambda *args, **kwargs: _VVResponse([{"AccVer_s": "NC_001405.1"}]),
     )
 
-    lineage = Taxonomy().esviritu_lineage("999", "NC_001405.1")
+    lineage = Taxonomy(vvsearch=_fast()).esviritu_lineage("999", "NC_001405.1")
 
     assert lineage["subspecies"] == "t__Human mastadenovirus F"
 
@@ -253,9 +260,11 @@ def test_vvsearch_failure_falls_back_to_taxdump(monkeypatch):
 
     monkeypatch.setattr("postviritu.taxonomy.requests.get", timeout)
 
-    lineage = Taxonomy().esviritu_lineage("999", "NC_001405.1")
+    tax = Taxonomy(vvsearch=_fast())
+    lineage = tax.esviritu_lineage("999", "NC_001405.1")
 
     assert lineage["subspecies"] == "t__Human mastadenovirus F"
+    assert tax.vvsearch_stats.failed == 1
 
 
 def test_nonvirus_lineage_does_not_query_vvsearch(monkeypatch):
@@ -274,6 +283,236 @@ def test_nonvirus_lineage_does_not_query_vvsearch(monkeypatch):
 
     monkeypatch.setattr("postviritu.taxonomy.requests.get", unexpected_request)
 
-    lineage = Taxonomy().esviritu_lineage("999", "NC_000001.11")
+    lineage = Taxonomy(vvsearch=_fast()).esviritu_lineage("999", "NC_000001.11")
 
     assert lineage["kingdom"] == "k__Eukaryota"
+
+
+def _virus_taxonomy(monkeypatch, vvsearch=None):
+    """A Taxonomy whose taxid 999 resolves to a virus species."""
+    _patch(
+        monkeypatch,
+        FakePyTaxonkit(
+            lineage_rows={
+                "999": (
+                    "Viruses;Mastadenovirus;Human mastadenovirus F",
+                    "acellular root;genus;species",
+                )
+            }
+        ),
+    )
+    return Taxonomy(vvsearch=vvsearch if vvsearch is not None else _fast())
+
+
+def test_vvsearch_failure_is_not_cached_and_is_retried(monkeypatch):
+    """A transient error must not permanently mark a reference genotype-less."""
+    tax = _virus_taxonomy(monkeypatch)
+    attempts = []
+
+    def flaky(url, **kwargs):
+        attempts.append(url)
+        if len(attempts) <= tax.vvsearch.max_attempts:
+            raise requests.ConnectionError("boom")
+        return _VVResponse([{"AccVer_s": "NC_001405.1", "Genotype_s": "F41"}])
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", flaky)
+
+    first = tax.esviritu_lineage("999", "NC_001405.1")
+    second = tax.esviritu_lineage("999", "NC_001405.1")
+
+    assert first["subspecies"] == "t__Human mastadenovirus F"  # degraded
+    assert second["subspecies"] == "t__F41"  # retried, not stuck on the failure
+    assert tax.vvsearch_stats.failed == 1
+    assert tax.vvsearch_stats.genotyped == 1
+
+
+def test_vvsearch_successful_answer_is_cached(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "postviritu.taxonomy.requests.get",
+        lambda url, **kw: calls.append(url) or _VVResponse([{"AccVer_s": "X"}]),
+    )
+
+    tax.esviritu_lineage("999", "NC_001405.1")
+    tax.esviritu_lineage("999", "NC_001405.1")
+
+    assert len(calls) == 1
+    assert tax.vvsearch_stats.empty == 1
+
+
+def test_vvsearch_circuit_breaker_stops_querying(monkeypatch):
+    """Repeated failures (an offline run) stop costing a timeout per reference."""
+    tax = _virus_taxonomy(
+        monkeypatch, _fast(max_attempts=1, max_consecutive_failures=2)
+    )
+    calls = []
+
+    def always_fails(url, **kwargs):
+        calls.append(url)
+        raise requests.ConnectionError("offline")
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", always_fails)
+
+    for accession in ["NC_000001.1", "NC_000002.1", "NC_000003.1", "NC_000004.1"]:
+        lineage = tax.esviritu_lineage("999", accession)
+        assert lineage["subspecies"] == "t__Human mastadenovirus F"
+
+    assert len(calls) == 2  # stopped after max_consecutive_failures
+    assert tax.vvsearch_stats.circuit_open is True
+    assert tax.vvsearch_stats.skipped == 2
+
+
+def test_vvsearch_recovery_resets_the_failure_streak(monkeypatch):
+    tax = _virus_taxonomy(
+        monkeypatch, _fast(max_attempts=1, max_consecutive_failures=2)
+    )
+    results = iter([None, "ok", None, None])
+
+    def sometimes(url, **kwargs):
+        outcome = next(results)
+        if outcome is None:
+            raise requests.ConnectionError("blip")
+        return _VVResponse([{"AccVer_s": "x", "Genotype_s": "G1"}])
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", sometimes)
+
+    for accession in ["NC_1.1", "NC_2.1", "NC_3.1"]:
+        tax.esviritu_lineage("999", accession)
+
+    # fail, succeed (streak reset), fail -> still below the threshold
+    assert tax.vvsearch_stats.circuit_open is False
+
+
+def test_vvsearch_disabled_makes_no_request(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch, _fast(enabled=False))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("vvsearch2 must not be queried when disabled")
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", unexpected)
+
+    lineage = tax.esviritu_lineage("999", "NC_001405.1")
+
+    assert lineage["subspecies"] == "t__Human mastadenovirus F"
+    assert tax.vvsearch_stats.attempted == 0
+    assert tax.vvsearch_stats.skipped == 1
+
+
+def test_vvsearch_genotype_whitespace_is_sanitized(monkeypatch):
+    """External text lands in a TSV cell, so tabs/newlines must not survive."""
+    tax = _virus_taxonomy(monkeypatch)
+    monkeypatch.setattr(
+        "postviritu.taxonomy.requests.get",
+        lambda *a, **kw: _VVResponse([{"Genotype_s": "  GII.4\tSydney\n"}]),
+    )
+
+    lineage = tax.esviritu_lineage("999", "NC_001405.1")
+
+    assert lineage["subspecies"] == "t__GII.4 Sydney"
+    assert "\t" not in lineage["subspecies"]
+    assert "\n" not in lineage["subspecies"]
+
+
+def test_vvsearch_whitespace_only_genotype_falls_back(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch)
+    monkeypatch.setattr(
+        "postviritu.taxonomy.requests.get",
+        lambda *a, **kw: _VVResponse([{"Genotype_s": "  \t "}]),
+    )
+
+    lineage = tax.esviritu_lineage("999", "NC_001405.1")
+
+    assert lineage["subspecies"] == "t__Human mastadenovirus F"
+
+
+def test_vvsearch_identifies_the_client(monkeypatch):
+    """NCBI asks callers to identify themselves."""
+    tax = _virus_taxonomy(monkeypatch, _fast(email="lab@example.org"))
+    captured = {}
+
+    def get(url, **kwargs):
+        captured.update(kwargs)
+        return _VVResponse([{"Genotype_s": "IIb"}])
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", get)
+    tax.esviritu_lineage("999", "NC_001405.1")
+
+    assert captured["params"]["tool"] == "postviritu"
+    assert captured["params"]["email"] == "lab@example.org"
+    assert captured["headers"]["User-Agent"].startswith("postviritu/")
+    assert captured["timeout"] == tax.vvsearch.timeout
+
+
+def test_vvsearch_rate_limit_spaces_requests(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch, _fast(min_interval=5.0))
+    slept = []
+    monkeypatch.setattr("postviritu.taxonomy.time.sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(
+        "postviritu.taxonomy.requests.get",
+        lambda *a, **kw: _VVResponse([{"Genotype_s": "G"}]),
+    )
+
+    tax.esviritu_lineage("999", "NC_000001.1")
+    tax.esviritu_lineage("999", "NC_000002.1")
+
+    # First request goes out immediately; the second waits for the interval.
+    assert len(slept) == 1
+    assert 0 < slept[0] <= 5.0
+
+
+@pytest.mark.parametrize("accession", ["   ", "\t", "|||", "!!!", "ref||"])
+def test_unparseable_accession_degrades_instead_of_raising(monkeypatch, accession):
+    tax = _virus_taxonomy(monkeypatch)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("no request should be made for a bad accession")
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", unexpected)
+
+    lineage = tax.esviritu_lineage("999", accession)
+
+    assert lineage["subspecies"] == "t__Human mastadenovirus F"
+
+
+def test_vvsearch_stats_summary_is_informative(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch)
+    monkeypatch.setattr(
+        "postviritu.taxonomy.requests.get",
+        lambda *a, **kw: _VVResponse([{"Genotype_s": "IIb"}]),
+    )
+    tax.esviritu_lineage("999", "NC_001405.1")
+
+    summary = tax.vvsearch_stats.summary()
+
+    assert "1 queried" in summary
+    assert "1 genotyped" in summary
+    assert tax.vvsearch_stats.as_dict()["genotyped"] == 1
+
+
+def test_allow_lookup_false_never_requests(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a read-only consumer must not query vvsearch2")
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", unexpected)
+
+    lineage = tax.esviritu_lineage("999", "NC_001405.1", allow_lookup=False)
+
+    assert lineage["subspecies"] == "t__Human mastadenovirus F"
+    assert tax.vvsearch_stats.attempted == 0
+    assert tax.vvsearch_stats.skipped == 0  # not a decision, just a cache miss
+
+
+def test_allow_lookup_false_reuses_a_resolved_genotype(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch)
+    monkeypatch.setattr(
+        "postviritu.taxonomy.requests.get",
+        lambda *a, **kw: _VVResponse([{"Genotype_s": "F41"}]),
+    )
+    tax.esviritu_lineage("999", "NC_001405.1")  # resolution warms the cache
+
+    lineage = tax.esviritu_lineage("999", "NC_001405.1", allow_lookup=False)
+
+    assert lineage["subspecies"] == "t__F41"

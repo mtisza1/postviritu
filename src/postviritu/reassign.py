@@ -258,7 +258,11 @@ def _resolve_with_hits(
     )
     lineage = taxdump_lineage
     genotype_applied = False
-    if assigned_taxid and not ambiguous:
+    # Only ask for a genotype when a subspecies-level call is defensible at
+    # all: below ``subspthresh`` the identity thresholding downstream refuses
+    # to name a subspecies, so asserting a genotype here would claim more
+    # resolution than the alignment supports (and spend a request doing it).
+    if assigned_taxid and not ambiguous and best_identity >= subspthresh:
         lineage = taxonomy.esviritu_lineage(assigned_taxid, accession=top["target"])
         genotype_applied = lineage.get("subspecies") != taxdump_lineage.get("subspecies")
 
