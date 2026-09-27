@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Mike Tisza" }]
 dependencies = [
-    "biopython>=1.89",
+    "biopython>=1.88",
     "polars>=1.0",
     "pyyaml>=6.0",
     "pandas>=1.0",
