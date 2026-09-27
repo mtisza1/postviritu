@@ -142,12 +142,7 @@ class FakeTaxonomy:
     def esviritu_lineage(self, taxid, accession=None, allow_lookup=True):
         genotype = None
         if accession is not None:
-            if allow_lookup:
-                self.genotype_queries.append(accession)
-                genotype = self.genotype_table.get(accession)
-                self.genotype_cache[accession] = genotype
-            else:
-                genotype = self.genotype_cache.get(accession)
+            genotype = self.genotypes([accession], allow_lookup)[accession]
         rmap = self.rank_table.get(taxid)
         if not rmap:
             return unclassified_lineage()
@@ -155,6 +150,23 @@ class FakeTaxonomy:
         if genotype:
             lineage["subspecies"] = "t__" + genotype
         return lineage
+
+    def genotypes(self, accessions, allow_lookup=True):
+        out = {}
+        for accession in dict.fromkeys(accessions):
+            if allow_lookup:
+                self.genotype_queries.append(accession)
+                self.genotype_cache[accession] = self.genotype_table.get(accession)
+            out[accession] = self.genotype_cache.get(accession)
+        return out
+
+    def viral_taxids(self, taxids):
+        return {
+            taxid
+            for taxid in taxids
+            if self.rank_table.get(taxid)
+            and map_ranks_to_esviritu(self.rank_table[taxid])["kingdom"] == "k__Viruses"
+        }
 
     def lca(self, taxids):
         clean = [t for t in dict.fromkeys(taxids) if t and t != "0"]

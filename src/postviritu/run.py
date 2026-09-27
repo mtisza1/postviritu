@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -23,9 +25,16 @@ from .io_esviritu import (
     write_tsv,
 )
 from .outputs import build_assembly_summary, build_tax_profile, rebuild_info
-from .reassign import AssemblyResolution, original_taxonomy, resolve_assemblies
+from .reassign import (
+    AssemblyResolution,
+    annotate_genotypes,
+    original_taxonomy,
+    resolve_assemblies,
+)
 from .report import write_html_report
 from .taxonomy import TaxaFilter, Taxonomy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -110,20 +119,25 @@ def run_sample(
     if filter_active:
         included_count = included_info["Assembly"].n_unique()
         total_count = info_df["Assembly"].n_unique()
-        print(
-            f"[postviritu] {sample.prefix}: {included_count}/{total_count} "
-            "assemblies pass taxa filter"
+        logger.info(
+            "%s: %d/%d assemblies pass taxa filter",
+            sample.prefix,
+            included_count,
+            total_count,
         )
         if included_count == 0:
-            print(
-                f"[postviritu] warning: {sample.prefix}: no assemblies matched "
-                "the taxa filter"
-            )
+            logger.warning("%s: no assemblies matched the taxa filter", sample.prefix)
 
     included_accessions = set(included_info["Accession"].to_list())
     included_seqs = {
         acc: seq for acc, seq in consensus_seqs.items() if acc in included_accessions
     }
+    logger.info(
+        "%s: %d/%d consensus sequence(s) selected for alignment",
+        sample.prefix,
+        len(included_seqs),
+        len(consensus_seqs),
+    )
 
     if included_seqs:
         tmp_dir = config.tmp_dir or os.path.join(outdir, f"{sample.prefix}_tmp")
@@ -143,17 +157,39 @@ def run_sample(
             result_name=f"{sample.prefix}_alignment.m8",
             query_nonN_len=query_nonN_len,
         )
+        raw_count = hits.height
         hits = filter_hits(
             hits,
             min_identity=config.min_identity,
             min_aln_fraction=config.min_aln_fraction,
             max_evalue=config.max_evalue,
         )
+        logger.info(
+            "%s: %d/%d alignment(s) pass filters (identity >= %g, query fraction >= %g, "
+            "evalue <= %g), covering %d/%d quer%s",
+            sample.prefix,
+            hits.height,
+            raw_count,
+            config.min_identity,
+            config.min_aln_fraction,
+            config.max_evalue,
+            hits["query"].n_unique(),
+            len(included_seqs),
+            "y" if len(included_seqs) == 1 else "ies",
+        )
+        logger.info("%s: annotating reference genotypes", sample.prefix)
+        hits = annotate_genotypes(hits, taxonomy)
     else:
         hits = empty_hits()
 
     resolutions: Dict[str, AssemblyResolution] = {}
     if not included_info.is_empty():
+        logger.info(
+            "%s: resolving taxonomy for %d assembl%s",
+            sample.prefix,
+            included_info["Assembly"].n_unique(),
+            "y" if included_info["Assembly"].n_unique() == 1 else "ies",
+        )
         inc_res = resolve_assemblies(
             hits=hits,
             info_df=included_info,
@@ -179,6 +215,7 @@ def run_sample(
 
     os.makedirs(outdir, exist_ok=True)
     out = SamplePaths(prefix=sample.prefix, directory=outdir)
+    logger.info("%s: writing outputs to %s", sample.prefix, outdir)
     write_tsv(new_info, out.info)
     write_tsv(assembly_summary, out.assembly_summary)
     write_tsv(tax_profile, out.tax_profile)
@@ -218,15 +255,19 @@ def run_batch(
     processed: List[str] = []
     samples = list(iter_samples(input_dir, sample_id=sample_id))
     if not samples:
-        print(f"No EsViritu samples found in {input_dir}")
+        logger.warning("No EsViritu samples found in %s", input_dir)
         return processed
-    for sample in samples:
-        print(f"[postviritu] processing sample: {sample.prefix}")
+    for index, sample in enumerate(samples, start=1):
+        logger.info("processing sample %d/%d: %s", index, len(samples), sample.prefix)
+        started = time.monotonic()
         try:
             run_sample(sample, aligner, taxonomy, outdir, config)
             processed.append(sample.prefix)
+            logger.info(
+                "finished sample %s in %.1fs", sample.prefix, time.monotonic() - started
+            )
         except FileNotFoundError as e:
-            print(f"[postviritu] skipping {sample.prefix}: {e}")
+            logger.warning("skipping %s: %s", sample.prefix, e)
     _report_vvsearch_stats(taxonomy)
     return processed
 
@@ -242,9 +283,9 @@ def _report_vvsearch_stats(taxonomy: Taxonomy) -> None:
         return
     if not (stats.attempted or stats.skipped):
         return
-    print(f"[postviritu] {stats.summary()}")
+    logger.info("%s", stats.summary())
     if stats.failed:
-        print(
-            "[postviritu] warning: some genotype lookups failed; the affected "
-            "assemblies kept taxdump-derived subspecies"
+        logger.warning(
+            "some genotype lookups failed; the affected references count as "
+            "ungenotyped, which blocks a genotype call for their assemblies"
         )

@@ -220,8 +220,77 @@ def test_virus_lineage_uses_vvsearch_genotype_and_caches_accession(monkeypatch):
 
     assert lineage["subspecies"] == "t__IIb"
     assert len(calls) == 1
-    assert calls[0][1]["params"]["q"] == 'AccVer_s:"MT903344.1"'
+    assert calls[0][1]["params"]["q"] == 'AccVer_s:("MT903344.1")'
     assert calls[0][1]["params"]["fq"] == 'SeqType_s:("Nucleotide")'
+
+
+def test_genotypes_batches_accessions_into_few_requests(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch, _fast(batch_size=2))
+    calls = []
+    table = {"A.1": "IIb", "B.1": None, "C.1": "Ia"}
+
+    def get(url, **kwargs):
+        calls.append(kwargs["params"])
+        requested = [a for a in table if f'"{a}"' in kwargs["params"]["q"]]
+        return _VVResponse(
+            [{"AccVer_s": a, "Genotype_s": table[a]} for a in requested if table[a]]
+        )
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", get)
+
+    result = tax.genotypes(["gi|1|gb|A.1|", "B.1", "C.1", "A.1", "!!!"])
+    again = tax.genotypes(["A.1", "C.1"])
+
+    assert result == {
+        "gi|1|gb|A.1|": "IIb",
+        "B.1": None,
+        "C.1": "Ia",
+        "A.1": "IIb",
+        "!!!": None,
+    }
+    assert again == {"A.1": "IIb", "C.1": "Ia"}
+    assert [c["q"] for c in calls] == ['AccVer_s:("A.1" OR "B.1")', 'AccVer_s:("C.1")']
+    assert [c["rows"] for c in calls] == [2, 1]
+    stats = tax.vvsearch_stats
+    assert (stats.attempted, stats.genotyped, stats.empty, stats.skipped) == (3, 2, 1, 1)
+
+
+def test_genotypes_logs_request_progress_and_retries(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="postviritu")
+    tax = _virus_taxonomy(monkeypatch, _fast(batch_size=2, max_attempts=2))
+    attempts = []
+
+    def get(url, **kwargs):
+        attempts.append(kwargs["params"]["q"])
+        if len(attempts) == 1:
+            raise requests.ConnectionError("blip")
+        return _VVResponse([{"AccVer_s": "A.1", "Genotype_s": "IIb"}])
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", get)
+    tax.genotypes(["A.1", "B.1", "C.1"])
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert (
+        "vvsearch2: 3 reference accession(s) to query in 2 request(s) of <= 2 "
+        "(0 already cached, 0 unparseable)"
+    ) in messages
+    assert any(
+        m.startswith(
+            "vvsearch2 request 1/2: 2 accession(s), 1-2 of 3 (66.7% cumulative) "
+            "(attempt 1/2) failed"
+        )
+        and "ConnectionError: blip; retrying" in m
+        for m in messages
+    )
+    assert any(
+        m.startswith("vvsearch2 request 2/2: 1 accession(s), 3-3 of 3 (100.0% cumulative)")
+        for m in messages
+    )
+    assert any(
+        m.startswith("vvsearch2: finished 3 accession(s)")
+        and "1 genotyped, 2 without genotype, 0 failed, 0 skipped" in m
+        for m in messages
+    )
 
 
 def test_vvsearch_empty_genotype_falls_back_to_taxdump(monkeypatch):
@@ -404,7 +473,7 @@ def test_vvsearch_genotype_whitespace_is_sanitized(monkeypatch):
     tax = _virus_taxonomy(monkeypatch)
     monkeypatch.setattr(
         "postviritu.taxonomy.requests.get",
-        lambda *a, **kw: _VVResponse([{"Genotype_s": "  GII.4\tSydney\n"}]),
+        lambda *a, **kw: _VVResponse([{"AccVer_s": "NC_001405.1", "Genotype_s": "  GII.4\tSydney\n"}]),
     )
 
     lineage = tax.esviritu_lineage("999", "NC_001405.1")
@@ -418,7 +487,7 @@ def test_vvsearch_whitespace_only_genotype_falls_back(monkeypatch):
     tax = _virus_taxonomy(monkeypatch)
     monkeypatch.setattr(
         "postviritu.taxonomy.requests.get",
-        lambda *a, **kw: _VVResponse([{"Genotype_s": "  \t "}]),
+        lambda *a, **kw: _VVResponse([{"AccVer_s": "NC_001405.1", "Genotype_s": "  \t "}]),
     )
 
     lineage = tax.esviritu_lineage("999", "NC_001405.1")
@@ -433,7 +502,7 @@ def test_vvsearch_identifies_the_client(monkeypatch):
 
     def get(url, **kwargs):
         captured.update(kwargs)
-        return _VVResponse([{"Genotype_s": "IIb"}])
+        return _VVResponse([{"AccVer_s": "NC_001405.1", "Genotype_s": "IIb"}])
 
     monkeypatch.setattr("postviritu.taxonomy.requests.get", get)
     tax.esviritu_lineage("999", "NC_001405.1")
@@ -450,7 +519,7 @@ def test_vvsearch_rate_limit_spaces_requests(monkeypatch):
     monkeypatch.setattr("postviritu.taxonomy.time.sleep", lambda s: slept.append(s))
     monkeypatch.setattr(
         "postviritu.taxonomy.requests.get",
-        lambda *a, **kw: _VVResponse([{"Genotype_s": "G"}]),
+        lambda *a, **kw: _VVResponse([{"AccVer_s": "NC_001405.1", "Genotype_s": "G"}]),
     )
 
     tax.esviritu_lineage("999", "NC_000001.1")
@@ -479,7 +548,7 @@ def test_vvsearch_stats_summary_is_informative(monkeypatch):
     tax = _virus_taxonomy(monkeypatch)
     monkeypatch.setattr(
         "postviritu.taxonomy.requests.get",
-        lambda *a, **kw: _VVResponse([{"Genotype_s": "IIb"}]),
+        lambda *a, **kw: _VVResponse([{"AccVer_s": "NC_001405.1", "Genotype_s": "IIb"}]),
     )
     tax.esviritu_lineage("999", "NC_001405.1")
 
@@ -509,7 +578,7 @@ def test_allow_lookup_false_reuses_a_resolved_genotype(monkeypatch):
     tax = _virus_taxonomy(monkeypatch)
     monkeypatch.setattr(
         "postviritu.taxonomy.requests.get",
-        lambda *a, **kw: _VVResponse([{"Genotype_s": "F41"}]),
+        lambda *a, **kw: _VVResponse([{"AccVer_s": "NC_001405.1", "Genotype_s": "F41"}]),
     )
     tax.esviritu_lineage("999", "NC_001405.1")  # resolution warms the cache
 

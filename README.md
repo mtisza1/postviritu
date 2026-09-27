@@ -70,11 +70,11 @@ postviritu run \
   --sample_id AYWM5R.p2126
 ```
 
-### Run with BLASTN -remote (no local DB)
+### Run with remote BLASTN (no local DB)
 
-You can also search NCBI's `nt` database remotely with `blastn` instead of
-building a local mmseqs2 database. The input and output formats are identical
-to `postviritu run`; only the search backend changes.
+You can also search NCBI's `nt` database remotely through Biopython's QBLAST
+client instead of building a local mmseqs2 database. The input and output
+formats are identical to `postviritu run`; only the search backend changes.
 
 ```bash
 postviritu blastn \
@@ -211,5 +211,5 @@ Assemblies skipped by `--taxa-filter` retain their original taxonomy and have
 
 ## Status / out of scope
 
-The package implements both the `mmseqs2` and `blastn -remote` backends via a
-pluggable aligner interface and does not re-map reads.
+The package implements both the `mmseqs2` and Biopython remote BLAST backends
+via a pluggable aligner interface and does not re-map reads.

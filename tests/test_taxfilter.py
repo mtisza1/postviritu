@@ -230,7 +230,8 @@ def test_run_sample_taxa_filter_includes_only_matching_assembly(tmp_path):
     assert skip_row["postviritu_hit_taxid"] is None
 
 
-def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path, capsys):
+def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path, caplog):
+    caplog.set_level("INFO", logger="postviritu")
     prefix = "S1"
     rows = [
         _info_row("accA", "asmA", "s__SpA"),
@@ -267,6 +268,8 @@ def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path, capsys):
     tax_profile = read_tsv(paths["tax_profile"])
     assert set(tax_profile["species"].to_list()) == {"s__unclassified_OrigGen"}
     assert not os.path.exists(os.path.join(outdir, f"{prefix}_tmp"))
-    output = capsys.readouterr().out
-    assert "S1: 0/2 assemblies pass taxa filter" in output
-    assert "warning: S1: no assemblies matched the taxa filter" in output
+    assert "S1: 0/2 assemblies pass taxa filter" in caplog.text
+    assert any(
+        r.levelname == "WARNING" and "S1: no assemblies matched the taxa filter" in r.getMessage()
+        for r in caplog.records
+    )

@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "postviritu"
-version = "0.1.0"
+version = "0.2.0"
 description = "Re-align EsViritu consensus genomes against a large NCBI DB (e.g. core_nt) with mmseqs2, re-derive taxonomy, and rewrite EsViritu-format outputs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Mike Tisza" }]
 dependencies = [
+    "biopython>=1.88",
     "polars>=1.0",
     "pyyaml>=6.0",
     "pandas>=1.0",

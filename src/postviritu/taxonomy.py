@@ -20,7 +20,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import requests
 import yaml
@@ -76,6 +76,7 @@ class VVSearchConfig:
     max_attempts: int = 3  # Per accession, within one lookup.
     backoff: float = 1.0  # Seconds; doubled after each failed attempt.
     max_consecutive_failures: int = 5  # Then stop querying for the whole run.
+    batch_size: int = 100  # Accessions per request (one Solr OR query).
     tool: str = "postviritu"
     email: Optional[str] = None
 
@@ -284,20 +285,24 @@ class Taxonomy:
                 time.sleep(interval - elapsed)
         self._last_request_at = time.monotonic()
 
-    def _vvsearch_request(self, accession: str) -> Tuple[Optional[str], bool]:
-        """Query vvsearch2 for one accession.
+    def _vvsearch_request(
+        self, accessions: Sequence[str], label: str = "vvsearch2 request"
+    ) -> Optional[Dict[str, Optional[str]]]:
+        """Query vvsearch2 for a batch of accessions in a single request.
 
-        Returns ``(genotype, answered)``. ``answered`` is False when every
-        attempt failed, which the caller must not confuse with an authoritative
-        "this reference has no genotype" (``(None, True)``).
+        Returns ``{accession: genotype}`` for every requested accession
+        (``None`` where NCBI holds no genotype), or ``None`` when every attempt
+        failed, which the caller must not confuse with an authoritative "these
+        references have no genotype". ``label`` prefixes the progress log lines.
         """
         cfg = self.vvsearch
+        terms = " OR ".join(f'"{accession}"' for accession in accessions)
         params = {
             "fq": 'SeqType_s:("Nucleotide")',
-            "q": f'AccVer_s:"{accession}"',
+            "q": f"AccVer_s:({terms})",
             "fl": "AccVer_s,Genotype_s",
             "wt": "json",
-            "rows": 1,
+            "rows": len(accessions),
         }
         # NCBI asks callers to identify themselves so they can contact the
         # owner of a misbehaving client instead of blocking it outright.
@@ -308,79 +313,181 @@ class Taxonomy:
         headers = {"User-Agent": f"{cfg.tool or 'postviritu'}/{__version__}"}
 
         delay = cfg.backoff
-        for attempt in range(1, max(1, cfg.max_attempts) + 1):
+        max_attempts = max(1, cfg.max_attempts)
+        for attempt in range(1, max_attempts + 1):
             self._throttle()
+            logger.info("%s (attempt %d/%d): sending", label, attempt, max_attempts)
+            started = time.monotonic()
             try:
                 response = requests.get(
                     _VVSEARCH_URL, params=params, headers=headers, timeout=cfg.timeout
                 )
                 response.raise_for_status()
                 docs = response.json()["response"]["docs"]
-                value = docs[0].get("Genotype_s") if docs else None
-                return _sanitize_genotype(value), True
-            except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
-                logger.debug(
-                    "vvsearch2 lookup for %s failed (attempt %d/%d): %s",
-                    accession,
-                    attempt,
-                    cfg.max_attempts,
-                    exc,
+                found = {
+                    doc["AccVer_s"]: _sanitize_genotype(doc.get("Genotype_s"))
+                    for doc in docs
+                    if doc.get("AccVer_s")
+                }
+                answers = {accession: found.get(accession) for accession in accessions}
+                logger.info(
+                    "%s: answered in %.1fs, %d/%d with a genotype",
+                    label,
+                    time.monotonic() - started,
+                    sum(1 for genotype in answers.values() if genotype),
+                    len(accessions),
                 )
-                if attempt < cfg.max_attempts:
+                return answers
+            except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+                retry = (
+                    f"retrying in {delay:.1f}s" if attempt < max_attempts else "giving up"
+                )
+                logger.warning(
+                    "%s (attempt %d/%d) failed after %.1fs: %s: %s; %s",
+                    label,
+                    attempt,
+                    max_attempts,
+                    time.monotonic() - started,
+                    type(exc).__name__,
+                    exc,
+                    retry,
+                )
+                if attempt < max_attempts:
                     if delay > 0:
                         time.sleep(delay)
                     delay *= 2
-        return None, False
+        return None
 
-    def _vvsearch_genotype(
-        self, accession: str, allow_lookup: bool = True
-    ) -> Optional[str]:
-        """Return the Virus Variation genotype for a reference accession.
+    def genotypes(
+        self, accessions: Sequence[str], allow_lookup: bool = True
+    ) -> Dict[str, Optional[str]]:
+        """Return ``{accession: Virus Variation genotype}`` for reference ids.
 
-        Always degrades to ``None`` rather than raising: the genotype is a
-        supplement to taxdump-derived taxonomy, never a prerequisite for it.
-        With ``allow_lookup=False`` only the cache is consulted, so read-only
-        consumers cannot introduce a genotype that the reassignment step
-        declined to ask for.
+        Keys are the identifiers as given (e.g. ``gi|…|gb|PQ065590.1|``); values
+        are ``None`` when no genotype is known. Uncached accessions are looked
+        up in batches of ``VVSearchConfig.batch_size`` per request. Always
+        degrades to ``None`` rather than raising: the genotype is a supplement
+        to taxdump-derived taxonomy, never a prerequisite for it. With
+        ``allow_lookup=False`` only the cache is consulted, so read-only
+        consumers cannot introduce a genotype that reassignment never resolved.
         """
-        acc = _normalize_accession(accession)
-        if acc is None:
-            if allow_lookup:
-                self.vvsearch_stats.skipped += 1
-            return None
-        if acc in self._genotype_cache:
-            return self._genotype_cache[acc]
-        if not allow_lookup:
-            return None
-        if not self.vvsearch.enabled or self._circuit_open:
-            self.vvsearch_stats.skipped += 1
-            return None
+        normalized = {raw: _normalize_accession(raw) for raw in dict.fromkeys(accessions)}
+        if allow_lookup:
+            unparseable = sum(acc is None for acc in normalized.values())
+            self.vvsearch_stats.skipped += unparseable
+            distinct = [acc for acc in dict.fromkeys(normalized.values()) if acc is not None]
+            pending = [acc for acc in distinct if acc not in self._genotype_cache]
+            if pending:
+                self._lookup_pending(pending, cached=len(distinct) - len(pending), unparseable=unparseable)
+        return {
+            raw: self._genotype_cache.get(acc) if acc else None
+            for raw, acc in normalized.items()
+        }
 
-        self.vvsearch_stats.attempted += 1
-        genotype, answered = self._vvsearch_request(acc)
-        if not answered:
-            self.vvsearch_stats.failed += 1
+    def _lookup_pending(self, pending: List[str], cached: int, unparseable: int) -> None:
+        """Look up uncached accessions in batches, logging progress."""
+        stats = self.vvsearch_stats
+        if not self.vvsearch.enabled or self._circuit_open:
+            reason = "disabled (--no-vvsearch)" if not self.vvsearch.enabled else (
+                "abandoned after repeated failures"
+            )
+            logger.info(
+                "vvsearch2: lookups %s; skipping %d reference accession(s)",
+                reason,
+                len(pending),
+            )
+            stats.skipped += len(pending)
+            return
+
+        batch_size = max(1, self.vvsearch.batch_size)
+        batches = [pending[i : i + batch_size] for i in range(0, len(pending), batch_size)]
+        logger.info(
+            "vvsearch2: %d reference accession(s) to query in %d request(s) of <= %d "
+            "(%d already cached, %d unparseable)",
+            len(pending),
+            len(batches),
+            batch_size,
+            cached,
+            unparseable,
+        )
+        before = (stats.genotyped, stats.empty, stats.failed, stats.skipped)
+        started = time.monotonic()
+        queried = 0
+        for index, batch in enumerate(batches, start=1):
+            label = (
+                f"vvsearch2 request {index}/{len(batches)}: {len(batch)} accession(s), "
+                f"{queried + 1}-{queried + len(batch)} of {len(pending)} "
+                f"({100 * (queried + len(batch)) / len(pending):.1f}% cumulative)"
+            )
+            self._lookup_batch(batch, label)
+            queried += len(batch)
+        genotyped, empty, failed, skipped = (
+            now - then
+            for now, then in zip(
+                (stats.genotyped, stats.empty, stats.failed, stats.skipped), before
+            )
+        )
+        logger.info(
+            "vvsearch2: finished %d accession(s) in %.1fs: %d genotyped, %d without "
+            "genotype, %d failed, %d skipped",
+            len(pending),
+            time.monotonic() - started,
+            genotyped,
+            empty,
+            failed,
+            skipped,
+        )
+
+    def _lookup_batch(self, batch: List[str], label: str = "vvsearch2 request") -> None:
+        """Resolve one batch of normalized accessions into the genotype cache."""
+        stats = self.vvsearch_stats
+        if not self.vvsearch.enabled or self._circuit_open:
+            stats.skipped += len(batch)
+            return
+
+        stats.attempted += len(batch)
+        answers = self._vvsearch_request(batch, label)
+        if answers is None:
+            stats.failed += len(batch)
             self._consecutive_failures += 1
             if self._consecutive_failures >= self.vvsearch.max_consecutive_failures:
                 # Offline or blocked: stop paying the timeout on every
                 # remaining reference and say so once.
                 self._circuit_open = True
-                self.vvsearch_stats.circuit_open = True
+                stats.circuit_open = True
                 logger.warning(
                     "Abandoning vvsearch2 genotype lookups after %d consecutive "
                     "failures; remaining assemblies keep taxdump-derived "
                     "subspecies. Use --no-vvsearch to make this explicit.",
                     self._consecutive_failures,
                 )
-            return None
+            return
 
         self._consecutive_failures = 0
-        self._genotype_cache[acc] = genotype
-        if genotype:
-            self.vvsearch_stats.genotyped += 1
-        else:
-            self.vvsearch_stats.empty += 1
-        return genotype
+        for accession, genotype in answers.items():
+            self._genotype_cache[accession] = genotype
+            if genotype:
+                stats.genotyped += 1
+            else:
+                stats.empty += 1
+
+    def _vvsearch_genotype(
+        self, accession: str, allow_lookup: bool = True
+    ) -> Optional[str]:
+        """Return the Virus Variation genotype for a single reference accession."""
+        return self.genotypes([accession], allow_lookup=allow_lookup)[accession]
+
+    def viral_taxids(self, taxids: Sequence[str]) -> set:
+        """Return the subset of ``taxids`` whose top-level lineage is Viruses."""
+        return {
+            taxid
+            for taxid, rmap in self.rank_maps(taxids).items()
+            if rmap
+            and map_ranks_to_esviritu(rmap)["kingdom"]
+            .removeprefix(RANK_PREFIXES["kingdom"])
+            .casefold()
+            == _DEFAULT_ROOT.casefold()
+        }
 
     def esviritu_lineage(
         self,
