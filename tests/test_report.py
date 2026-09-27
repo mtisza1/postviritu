@@ -303,3 +303,32 @@ def test_write_html_report_groups_segments_under_one_reference(tmp_path):
     assert report.count('class="reference-alignment"') == 1
     assert report.count('<pre class="alignment">') == 2
     assert report.count(">ref1</span>") == 1
+
+
+def test_write_html_report_uses_genotype_resolved_during_the_run(tmp_path):
+    """The report must name taxa the same way the output tables do."""
+    path = tmp_path / "report.html"
+    taxonomy = _taxonomy()
+    # The best-scoring reference for taxid 100 is reference-0-0 (highest bitscore).
+    taxonomy.genotype_table["reference-0-0"] = "GII.4"
+    # Reassignment runs before the report and resolves the genotype.
+    taxonomy.esviritu_lineage("100", accession="reference-0-0")
+    queries_after_resolution = list(taxonomy.genotype_queries)
+
+    write_html_report(str(path), "S1", _info_df(), _hits(), _resolutions(), taxonomy)
+
+    assert "GII.4" in path.read_text()
+    # The report is a view, not a second round of lookups.
+    assert taxonomy.genotype_queries == queries_after_resolution
+
+
+def test_write_html_report_does_not_introduce_unresolved_genotypes(tmp_path):
+    """A genotype reassignment declined to fetch must not appear in the report."""
+    path = tmp_path / "report.html"
+    taxonomy = _taxonomy()
+    taxonomy.genotype_table["reference-0-0"] = "GII.4"
+
+    write_html_report(str(path), "S1", _info_df(), _hits(), _resolutions(), taxonomy)
+
+    assert "GII.4" not in path.read_text()
+    assert taxonomy.genotype_queries == []

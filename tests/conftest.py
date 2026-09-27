@@ -6,6 +6,23 @@ import pytest
 from postviritu.aligner import HIT_SCHEMA
 from postviritu.taxonomy import map_ranks_to_esviritu, unclassified_lineage
 
+
+@pytest.fixture(autouse=True)
+def _no_live_http(monkeypatch):
+    """Fail loudly if any test reaches the network.
+
+    Tests that exercise the vvsearch2 client monkeypatch ``requests.get``
+    themselves; this guard makes sure nothing else quietly queries NCBI from
+    CI, where a live call would be slow, flaky, and rude.
+    """
+
+    def blocked(*args, **kwargs):
+        raise AssertionError(
+            "Unexpected live HTTP request in tests; monkeypatch requests.get"
+        )
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", blocked)
+
 EXAMPLE_PREFIX = "AYWM5R.p2126"
 
 
@@ -111,15 +128,33 @@ class FakeTaxonomy:
     frozenset of taxids -> taxid for deterministic LCA results.
     """
 
-    def __init__(self, rank_table=None, lca_table=None):
+    def __init__(self, rank_table=None, lca_table=None, genotype_table=None):
         self.rank_table = rank_table or {}
         self.lca_table = lca_table or {}
+        self.genotype_table = genotype_table or {}
+        # Accessions a genotype lookup was actually requested for, so tests can
+        # assert that the lookup is skipped where it should be.
+        self.genotype_queries = []
+        # Mirrors the real resolver's per-run cache, so ``allow_lookup=False``
+        # callers see exactly the genotypes an earlier lookup resolved.
+        self.genotype_cache = {}
 
-    def esviritu_lineage(self, taxid):
+    def esviritu_lineage(self, taxid, accession=None, allow_lookup=True):
+        genotype = None
+        if accession is not None:
+            if allow_lookup:
+                self.genotype_queries.append(accession)
+                genotype = self.genotype_table.get(accession)
+                self.genotype_cache[accession] = genotype
+            else:
+                genotype = self.genotype_cache.get(accession)
         rmap = self.rank_table.get(taxid)
         if not rmap:
             return unclassified_lineage()
-        return map_ranks_to_esviritu(rmap)
+        lineage = map_ranks_to_esviritu(rmap)
+        if genotype:
+            lineage["subspecies"] = "t__" + genotype
+        return lineage
 
     def lca(self, taxids):
         clean = [t for t in dict.fromkeys(taxids) if t and t != "0"]
