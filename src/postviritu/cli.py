@@ -3,7 +3,7 @@
 Subcommands:
   setup-db   build the mmseqs2 target DB + taxonomy (run once)
   run        re-align EsViritu consensus genomes and rewrite outputs
-  blastn     re-align using NCBI BLASTN -remote against nt
+  blastn     re-align using Biopython's remote NCBI BLAST against nt
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # blastn
     p_blastn = sub.add_parser(
         "blastn",
-        help="Re-align consensus genomes using NCBI BLASTN -remote against nt.",
+        help="Re-align consensus genomes using Biopython's remote NCBI BLAST against nt.",
     )
     p_blastn.add_argument(
         "--input-dir", required=True, help="Directory of EsViritu outputs."
@@ -145,7 +145,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="(disagree mode) second-round re-align excluding the round-1 taxid.",
     )
     p_blastn.add_argument("--threads", type=int, default=1)
-    p_blastn.add_argument("--blastn-bin", default="blastn")
     p_blastn.add_argument(
         "--db", default="nt", help="NCBI database name (default: nt)."
     )
@@ -282,7 +281,6 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
 
     aligner = BlastnAligner(
         db=args.db,
-        blastn_bin=args.blastn_bin,
         max_target_seqs=args.max_target_seqs,
         batch_size=args.batch_size,
     )

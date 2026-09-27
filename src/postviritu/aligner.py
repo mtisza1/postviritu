@@ -503,10 +503,15 @@ def parse_blastn(
     if not os.path.isfile(path) or os.path.getsize(path) == 0:
         return empty_hits()
 
+    with open(path) as handle:
+        if not any(line.strip() and not line.startswith("#") for line in handle):
+            return empty_hits()
+
     raw = pl.read_csv(
         path,
         separator="\t",
         has_header=False,
+        comment_prefix="#",
         new_columns=fields,
         infer_schema_length=10000,
         schema_overrides={"staxids": pl.Utf8},
@@ -556,9 +561,9 @@ def parse_blastn(
 
 
 class BlastnAligner(Aligner):
-    """NCBI BLASTN ``-remote`` backend against the ``nt`` database."""
+    """Biopython NCBI QBLAST backend against the ``nt`` database."""
 
-    # BLASTN -outfmt 6 field order (must match parsing above).
+    # BLASTN tabular field order (must match parsing above).
     _FORMAT_FIELDS = [
         "qseqid",
         "sseqid",
@@ -580,16 +585,14 @@ class BlastnAligner(Aligner):
     def __init__(
         self,
         db: str = "nt",
-        blastn_bin: str = "blastn",
         max_target_seqs: int = 300,
         batch_size: int = 3,
-        extra_args: Optional[List[str]] = None,
+        extra_args: Optional[Dict[str, object]] = None,
     ):
         self.db = db
-        self.blastn_bin = blastn_bin
         self.max_target_seqs = max_target_seqs
         self.batch_size = batch_size
-        self.extra_args = extra_args or []
+        self.extra_args = extra_args or {}
 
     def search(
         self,
@@ -601,11 +604,7 @@ class BlastnAligner(Aligner):
         result_name: str = "result.m8",
         query_nonN_len: Optional[Dict[str, int]] = None,
     ) -> pl.DataFrame:
-        if shutil.which(self.blastn_bin) is None:
-            raise RuntimeError(
-                f"'{self.blastn_bin}' not found on PATH. Install BLAST+ "
-                "(e.g. `conda install -c bioconda blast`)."
-            )
+        from Bio import Blast
 
         if tmp_dir is None:
             tmp_root = tempfile.mkdtemp(prefix="postviritu_blastn_")
@@ -626,22 +625,25 @@ class BlastnAligner(Aligner):
                 batch_out = os.path.join(tmp_root, f"batch_{i}.tsv")
                 write_fasta(dict(batch), batch_fasta)
 
-                cmd = [
-                    self.blastn_bin,
-                    "-query",
-                    batch_fasta,
-                    "-db",
-                    self.db,
-                    "-remote",
-                    "-outfmt",
-                    f"6 {' '.join(self._FORMAT_FIELDS)}",
-                    "-out",
-                    batch_out,
-                    "-max_target_seqs",
-                    str(self.max_target_seqs),
-                    *self.extra_args,
-                ]
-                subprocess.run(cmd, check=True)
+                with open(batch_fasta) as query_handle:
+                    result_stream = Blast.qblast(
+                        "blastn",
+                        self.db,
+                        query_handle.read(),
+                        format_type="Tabular",
+                        hitlist_size=self.max_target_seqs,
+                        alignments=self.max_target_seqs,
+                        descriptions=self.max_target_seqs,
+                        **self.extra_args,
+                    )
+                    try:
+                        result = result_stream.read()
+                    finally:
+                        result_stream.close()
+                if isinstance(result, bytes):
+                    result = result.decode()
+                with open(batch_out, "w") as out_handle:
+                    out_handle.write(result)
                 batch_out_paths.append(batch_out)
 
             # Concatenate per-batch tabular outputs into a single result file.
@@ -654,7 +656,7 @@ class BlastnAligner(Aligner):
             hits = parse_blastn(result_path, self._FORMAT_FIELDS, query_nonN_len)
 
             if exclude_taxids:
-                # BLASTN -remote does not support -negative_taxids, so filter the
+                # QBLAST does not support negative taxids, so filter the
                 # tabular results locally (exact taxid match).
                 exclude = [str(t) for t in exclude_taxids]
                 hits = hits.filter(~pl.col("taxid").is_in(exclude))
