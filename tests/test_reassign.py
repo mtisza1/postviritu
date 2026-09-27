@@ -5,6 +5,7 @@ from postviritu.io_esviritu import TAX_RANKS
 from postviritu.reassign import (
     MODE_DISAGREE,
     MODE_SCRATCH,
+    annotate_genotypes,
     resolve_assemblies,
 )
 
@@ -192,24 +193,16 @@ def test_disagree_agreement_uses_vvsearch_genotype():
     info = pl.DataFrame(
         [_info_row("accA1", "asmA", "s__Human mastadenovirus F", "t__strain")]
     )
-    hits = make_hits(
-        [
-            {
-                "query": "accA1", "target": "tgtA", "taxid": "100",
-                "pct_identity": 0.99, "aln_length": 1000, "query_length": 1000,
-                "query_coverage": 0.95, "evalue": 1e-50, "bitscore": 500.0,
-            }
-        ]
-    )
-    taxonomy = _taxonomy()
-    taxonomy.genotype_table["tgtA"] = "GII.4"
+    hits = make_hits([_hit(genotype="GII.4")])
 
     resolution = resolve_assemblies(
-        hits, info, taxonomy, mode=MODE_DISAGREE
+        hits, info, _taxonomy(), mode=MODE_DISAGREE
     )["asmA"]
 
     assert resolution.decision == "kept_original"
     assert resolution.lineage["subspecies"] == "t__GII.4"
+    assert resolution.genotypes == "GII.4(1)"
+    assert resolution.genotype_ambiguous is False
 
 
 def test_disagree_no_hit_keeps_original():
@@ -263,7 +256,9 @@ def test_disagree_realign_tie_detected():
     assert a.decision == "lca_ambiguous_realigned"
 
 
-def _hit(query="accA1", target="tgtA", taxid="100", identity=0.99, bitscore=500.0):
+def _hit(
+    query="accA1", target="tgtA", taxid="100", identity=0.99, bitscore=500.0, genotype=None
+):
     return {
         "query": query,
         "target": target,
@@ -274,17 +269,23 @@ def _hit(query="accA1", target="tgtA", taxid="100", identity=0.99, bitscore=500.
         "query_coverage": 0.95,
         "evalue": 1e-50,
         "bitscore": bitscore,
+        "genotype": genotype,
     }
+
+
+def _scratch(hits, **kwargs):
+    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
+    return resolve_assemblies(
+        make_hits(hits), info, kwargs.pop("taxonomy", _taxonomy()), mode=MODE_SCRATCH, **kwargs
+    )["asmA"]
 
 
 def test_disagree_override_carries_genotype():
     """An overridden call keeps the enriched subspecies, not just the agreeing one."""
     info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
-    taxonomy = _taxonomy()
-    taxonomy.genotype_table["tgtA"] = "F41"
 
     resolution = resolve_assemblies(
-        make_hits([_hit()]), info, taxonomy, mode=MODE_DISAGREE
+        make_hits([_hit(genotype="F41")]), info, _taxonomy(), mode=MODE_DISAGREE
     )["asmA"]
 
     assert resolution.decision == "overridden"
@@ -292,59 +293,120 @@ def test_disagree_override_carries_genotype():
     assert resolution.lineage["subspecies"] == "t__F41"
 
 
-def test_ambiguous_lca_skips_genotype_lookup():
-    """An LCA call is not a subspecies-level claim, so no genotype is fetched."""
-    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
-    taxonomy = _taxonomy()
-    taxonomy.genotype_table["tgtA"] = "F41"
+def test_unanimous_genotype_across_tied_references_is_applied():
+    resolution = _scratch(
+        [
+            _hit(target="tgtA", genotype="IIb"),
+            _hit(target="tgtB", bitscore=499.0, genotype="IIb"),
+        ]
+    )
 
-    resolution = resolve_assemblies(
-        make_hits(
-            [
-                _hit(target="tgtA", taxid="200", bitscore=500.0),
-                _hit(target="tgtB", taxid="300", bitscore=499.0),
-            ]
-        ),
-        info,
-        taxonomy,
-        mode=MODE_SCRATCH,
-    )["asmA"]
+    assert resolution.lineage["subspecies"] == "t__IIb"
+    assert resolution.genotypes == "IIb(2)"
+    assert resolution.genotype_ambiguous is False
+
+
+def test_conflicting_tied_genotypes_are_not_applied():
+    resolution = _scratch(
+        [
+            _hit(target="tgtA", genotype="IIb"),
+            _hit(target="tgtB", bitscore=499.5, genotype="IIb"),
+            _hit(target="tgtC", bitscore=499.0, genotype="Ia"),
+        ]
+    )
+
+    assert resolution.lineage["subspecies"] == "t__Human mastadenovirus F"
+    assert resolution.genotypes == "IIb(2);Ia(1)"
+    assert resolution.genotype_ambiguous is True
+
+
+def test_ungenotyped_tied_reference_blocks_the_genotype():
+    resolution = _scratch(
+        [
+            _hit(target="tgtA", genotype="IIb"),
+            _hit(target="tgtB", bitscore=499.0, genotype=None),
+        ]
+    )
+
+    assert resolution.lineage["subspecies"] == "t__Human mastadenovirus F"
+    assert resolution.genotypes == "IIb(1);none(1)"
+    assert resolution.genotype_ambiguous is True
+
+
+def test_references_outside_the_tie_do_not_affect_the_genotype():
+    resolution = _scratch(
+        [
+            _hit(target="tgtA", genotype="IIb"),
+            _hit(target="tgtB", bitscore=300.0, genotype="Ia"),
+        ]
+    )
+
+    assert resolution.lineage["subspecies"] == "t__IIb"
+    assert resolution.genotypes == "IIb(1)"
+
+
+def test_unanimous_genotype_applies_to_taxid_tie_resolved_at_species():
+    taxonomy = FakeTaxonomy(
+        rank_table={
+            "100": {"superkingdom": "Viruses", "genus": "Orthopoxvirus", "species": "Mpox"},
+        },
+        lca_table={frozenset({"200", "300"}): "100"},
+    )
+    resolution = _scratch(
+        [
+            _hit(target="tgtA", taxid="200", genotype="IIb"),
+            _hit(target="tgtB", taxid="300", genotype="IIb"),
+        ],
+        taxonomy=taxonomy,
+    )
+
+    assert resolution.ambiguous is True
+    assert resolution.lineage["species"] == "s__Mpox"
+    assert resolution.lineage["subspecies"] == "t__IIb"
+
+
+def test_unanimous_genotype_is_not_applied_without_a_species():
+    """An LCA above species has nothing for a genotype to subtype."""
+    resolution = _scratch(
+        [
+            _hit(target="tgtA", taxid="200", genotype="F41"),
+            _hit(target="tgtB", taxid="300", bitscore=499.0, genotype="F41"),
+        ]
+    )
 
     assert resolution.ambiguous is True
     assert resolution.lineage["subspecies"] != "t__F41"
-    assert taxonomy.genotype_queries == []
 
 
-def test_low_identity_skips_genotype_lookup():
-    """Below subspthresh no subspecies is asserted, so no request is spent."""
-    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
-    taxonomy = _taxonomy()
-    taxonomy.genotype_table["tgtA"] = "F41"
-
-    resolution = resolve_assemblies(
-        make_hits([_hit(identity=0.92)]),
-        info,
-        taxonomy,
-        mode=MODE_SCRATCH,
-        subspthresh=0.95,
-    )["asmA"]
+def test_low_identity_does_not_apply_genotype():
+    """Below subspthresh no subspecies is asserted."""
+    resolution = _scratch([_hit(identity=0.92, genotype="F41")], subspthresh=0.95)
 
     assert resolution.lineage["subspecies"] != "t__F41"
-    assert taxonomy.genotype_queries == []
+    assert resolution.genotypes == "F41(1)"
 
 
-def test_identity_at_threshold_performs_genotype_lookup():
-    info = pl.DataFrame([_info_row("accA1", "asmA", "s__OrigSpeciesA", "t__strain")])
-    taxonomy = _taxonomy()
-    taxonomy.genotype_table["tgtA"] = "F41"
-
-    resolution = resolve_assemblies(
-        make_hits([_hit(identity=0.95)]),
-        info,
-        taxonomy,
-        mode=MODE_SCRATCH,
-        subspthresh=0.95,
-    )["asmA"]
+def test_identity_at_threshold_applies_genotype():
+    resolution = _scratch([_hit(identity=0.95, genotype="F41")], subspthresh=0.95)
 
     assert resolution.lineage["subspecies"] == "t__F41"
-    assert taxonomy.genotype_queries == ["tgtA"]
+
+
+def test_annotate_genotypes_looks_up_every_viral_target():
+    taxonomy = _taxonomy()
+    taxonomy.rank_table["900"] = {"superkingdom": "Bacteria", "species": "E. coli"}
+    taxonomy.genotype_table.update({"tgtA": "IIb", "tgtB": "Ia", "tgtX": "nope"})
+    hits = make_hits(
+        [
+            _hit(target="tgtA"),
+            _hit(target="tgtA", bitscore=100.0),
+            _hit(target="tgtB", bitscore=300.0),
+            _hit(target="tgtC", bitscore=200.0),
+            _hit(target="tgtX", taxid="900"),
+        ]
+    )
+
+    annotated = annotate_genotypes(hits, taxonomy)
+
+    assert annotated["genotype"].to_list() == ["IIb", "IIb", "Ia", None, None]
+    assert sorted(taxonomy.genotype_queries) == ["tgtA", "tgtB", "tgtC"]

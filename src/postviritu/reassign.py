@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -50,6 +51,51 @@ class AssemblyResolution:
     esviritu_species: Optional[str] = None
     esviritu_subspecies: Optional[str] = None
     tied_taxids: List[str] = field(default_factory=list)
+    genotypes: Optional[str] = None
+    genotype_ambiguous: bool = False
+
+
+def annotate_genotypes(hits: pl.DataFrame, taxonomy: Taxonomy) -> pl.DataFrame:
+    """Fill the ``genotype`` column with Virus Variation genotypes.
+
+    Every distinct viral target is looked up (in batches); non-viral targets
+    and references without a recorded genotype get ``None``.
+    """
+    if hits.is_empty():
+        return hits
+    viral = taxonomy.viral_taxids(hits["taxid"].drop_nulls().unique().to_list())
+    targets = (
+        hits.filter(pl.col("taxid").is_in(list(viral)))["target"]
+        .drop_nulls()
+        .unique(maintain_order=True)
+        .to_list()
+    )
+    genotypes = taxonomy.genotypes(targets) if targets else {}
+    return hits.with_columns(
+        pl.col("target")
+        .replace_strict(genotypes, default=None, return_dtype=pl.Utf8)
+        .alias("genotype")
+    )
+
+
+def _genotype_consensus(best: pl.DataFrame):
+    """Summarise the genotypes of the tied best references.
+
+    Returns ``(unanimous, summary)``. ``unanimous`` is the single genotype
+    shared by *every* tied reference, or ``None`` when they disagree or any of
+    them lacks a genotype. ``summary`` lists the counts, e.g.
+    ``IIb(205);Ia(38);none(20)``, or is ``None`` if no reference is genotyped.
+    """
+    genotypes = best.unique(subset=["target"], maintain_order=True)["genotype"].to_list()
+    if not any(genotypes):
+        return None, None
+    counts = Counter(g or "none" for g in genotypes)
+    summary = ";".join(
+        f"{g}({n})"
+        for g, n in sorted(counts.items(), key=lambda item: (item[0] == "none", -item[1], item[0]))
+    )
+    unanimous = genotypes[0] if len(counts) == 1 else None
+    return unanimous, summary
 
 
 def apply_identity_thresholds(
@@ -258,13 +304,23 @@ def _resolve_with_hits(
     )
     lineage = taxdump_lineage
     genotype_applied = False
-    # Only ask for a genotype when a subspecies-level call is defensible at
-    # all: below ``subspthresh`` the identity thresholding downstream refuses
-    # to name a subspecies, so asserting a genotype here would claim more
-    # resolution than the alignment supports (and spend a request doing it).
-    if assigned_taxid and not ambiguous and best_identity >= subspthresh:
-        lineage = taxonomy.esviritu_lineage(assigned_taxid, accession=top["target"])
-        genotype_applied = lineage.get("subspecies") != taxdump_lineage.get("subspecies")
+    # A genotype is only asserted when every tied best reference carries the
+    # same one: references that tie on score but differ (or lack a genotype)
+    # mean the alignment cannot discriminate between them. Below
+    # ``subspthresh`` the identity thresholding downstream refuses to name a
+    # subspecies, and without a named species there is nothing to subtype.
+    unanimous_genotype, genotype_summary = _genotype_consensus(best)
+    if (
+        unanimous_genotype
+        and assigned_taxid
+        and best_identity >= subspthresh
+        and not lineage["species"].startswith(RANK_PREFIXES["species"] + "unclassified_")
+    ):
+        lineage = {
+            **lineage,
+            "subspecies": RANK_PREFIXES["subspecies"] + unanimous_genotype,
+        }
+        genotype_applied = True
 
     # Decide whether to override EsViritu in disagree mode.
     if mode == MODE_DISAGREE and not ambiguous:
@@ -293,6 +349,8 @@ def _resolve_with_hits(
         esviritu_species=orig_species,
         esviritu_subspecies=orig_subspecies,
         tied_taxids=tied_taxids,
+        genotypes=genotype_summary,
+        genotype_ambiguous=genotype_summary is not None and unanimous_genotype is None,
     )
 
 

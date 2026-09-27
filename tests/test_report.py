@@ -305,25 +305,30 @@ def test_write_html_report_groups_segments_under_one_reference(tmp_path):
     assert report.count(">ref1</span>") == 1
 
 
-def test_write_html_report_uses_genotype_resolved_during_the_run(tmp_path):
-    """The report must name taxa the same way the output tables do."""
+def test_write_html_report_shows_each_reference_genotype(tmp_path):
+    """Tied references with different genotypes stay distinguishable."""
     path = tmp_path / "report.html"
+    hits = _hits().with_columns(
+        pl.when(pl.col("target") == "reference-0-0")
+        .then(pl.lit("IIb"))
+        .when(pl.col("target") == "reference-0-1")
+        .then(pl.lit("Ia"))
+        .otherwise(None)
+        .alias("genotype")
+    )
     taxonomy = _taxonomy()
-    # The best-scoring reference for taxid 100 is reference-0-0 (highest bitscore).
-    taxonomy.genotype_table["reference-0-0"] = "GII.4"
-    # Reassignment runs before the report and resolves the genotype.
-    taxonomy.esviritu_lineage("100", accession="reference-0-0")
-    queries_after_resolution = list(taxonomy.genotype_queries)
 
-    write_html_report(str(path), "S1", _info_df(), _hits(), _resolutions(), taxonomy)
+    write_html_report(str(path), "S1", _info_df(), hits, _resolutions(), taxonomy)
 
-    assert "GII.4" in path.read_text()
-    # The report is a view, not a second round of lookups.
-    assert taxonomy.genotype_queries == queries_after_resolution
+    report = path.read_text()
+    assert "Database species 0 · IIb" in report
+    assert "Database species 0 · Ia" in report
+    # The report is a view, not a round of lookups.
+    assert taxonomy.genotype_queries == []
 
 
 def test_write_html_report_does_not_introduce_unresolved_genotypes(tmp_path):
-    """A genotype reassignment declined to fetch must not appear in the report."""
+    """A genotype missing from the annotated hits must not appear in the report."""
     path = tmp_path / "report.html"
     taxonomy = _taxonomy()
     taxonomy.genotype_table["reference-0-0"] = "GII.4"

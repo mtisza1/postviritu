@@ -25,6 +25,8 @@ PROVENANCE_COLUMNS = [
     "postviritu_pct_identity",
     "postviritu_ambiguous",
     "postviritu_decision",
+    "postviritu_genotypes",
+    "postviritu_genotype_ambiguous",
 ]
 
 
@@ -43,6 +45,8 @@ def resolutions_to_df(resolutions: Dict[str, AssemblyResolution]) -> pl.DataFram
         row["postviritu_pct_identity"] = res.pct_identity
         row["postviritu_ambiguous"] = res.ambiguous
         row["postviritu_decision"] = res.decision
+        row["postviritu_genotypes"] = res.genotypes
+        row["postviritu_genotype_ambiguous"] = res.genotype_ambiguous
         rows.append(row)
     schema = {"Assembly": pl.Utf8}
     schema.update({r: pl.Utf8 for r in TAX_RANKS})
@@ -56,6 +60,8 @@ def resolutions_to_df(resolutions: Dict[str, AssemblyResolution]) -> pl.DataFram
             "postviritu_pct_identity": pl.Float64,
             "postviritu_ambiguous": pl.Boolean,
             "postviritu_decision": pl.Utf8,
+            "postviritu_genotypes": pl.Utf8,
+            "postviritu_genotype_ambiguous": pl.Boolean,
         }
     )
     return pl.DataFrame(rows, schema=schema)

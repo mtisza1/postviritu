@@ -15,6 +15,8 @@ from typing import List, Optional
 
 from . import __version__
 
+logger = logging.getLogger("postviritu")
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -26,6 +28,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--version", action="version", version=f"postviritu {__version__}")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Debug-level logging (default: timestamped progress at info level).",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # setup-db
@@ -230,7 +238,7 @@ def _cmd_setup_db(args: argparse.Namespace) -> int:
         threads=args.threads,
         mmseqs_bin=args.mmseqs_bin,
     )
-    print(f"[postviritu] database ready at: {args.out}")
+    logger.info("database ready at: %s", args.out)
     return 0
 
 
@@ -270,7 +278,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         config=config,
         sample_id=args.sample_id,
     )
-    print(f"[postviritu] processed {len(processed)} sample(s): {', '.join(processed)}")
+    logger.info("processed %d sample(s): %s", len(processed), ", ".join(processed))
     return 0
 
 
@@ -308,16 +316,22 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
         config=config,
         sample_id=args.sample_id,
     )
-    print(f"[postviritu] processed {len(processed)} sample(s): {', '.join(processed)}")
+    logger.info("processed %d sample(s): %s", len(processed), ", ".join(processed))
     return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    # Match the print-based convention used elsewhere so library warnings
-    # (e.g. abandoned genotype lookups) are not silently discarded.
-    logging.basicConfig(level=logging.INFO, format="[postviritu] %(message)s")
     parser = _build_parser()
     args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [postviritu] %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    # Keep third-party chatter (HTTP connection pools) out of the progress log
+    # unless explicitly debugging.
+    if not args.verbose:
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
     return args.func(args)
 
 

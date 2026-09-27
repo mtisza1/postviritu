@@ -81,8 +81,8 @@ def _alignment(qaln: Optional[str], taln: Optional[str], width: int = 60) -> str
     return f'<pre class="alignment">{content}</pre>'
 
 
-def _taxon_name(taxonomy: Taxonomy, taxid: str, accession: Optional[str] = None) -> str:
-    lineage = taxonomy.esviritu_lineage(taxid, accession=accession, allow_lookup=False)
+def _taxon_name(taxonomy: Taxonomy, taxid: str) -> str:
+    lineage = taxonomy.esviritu_lineage(taxid, allow_lookup=False)
     for rank in reversed(TAX_RANKS):
         value = lineage.get(rank)
         if value and _display_taxon(value) != "unclassified":
@@ -121,7 +121,8 @@ def _reference(reference_hits: Iterable[dict], lineage: Dict[str, str]) -> str:
     evalue = hit.get("evalue")
     evalue_text = f"{float(evalue):.2g}" if evalue is not None else "n/a"
     species = _display_taxon(lineage.get("species"))
-    subspecies = _display_taxon(lineage.get("subspecies"))
+    genotype = hit.get("genotype")
+    subspecies = genotype or _display_taxon(lineage.get("subspecies"))
     taxonomy_line = " · ".join(
         part for part in (species, subspecies) if part and part != "unclassified"
     ) or "unclassified"
@@ -173,20 +174,11 @@ def _taxon_cards(
             ranks.append(ranks[-1] + 1)
         prev_bits = bits
 
-    # The accession of each taxon's best-scoring reference, so the report names
-    # taxa the same way the output tables do. ``allow_lookup=False`` keeps the
-    # report a pure view of decisions reassignment already made: it reuses a
-    # genotype that was resolved for this run and never requests a new one.
-    best_accession = {
-        taxid: max(grouped[taxid], key=lambda hit: float(hit.get("bitscore") or 0)).get(
-            "target"
-        )
-        for taxid, _ in scored
-    }
+    # Taxon cards carry the taxdump lineage; each reference line shows its own
+    # genotype from the annotated hits, so tied references with different
+    # genotypes stay distinguishable. The report never queries vvsearch2.
     lineages = {
-        taxid: taxonomy.esviritu_lineage(
-            taxid, accession=best_accession.get(taxid), allow_lookup=False
-        )
+        taxid: taxonomy.esviritu_lineage(taxid, allow_lookup=False)
         for taxid, _ in scored
     }
 
@@ -209,7 +201,7 @@ def _taxon_cards(
         cards.append(
             '<article class="taxon-card">'
             '<header><div>'
-            f'<h2>{_escape(_taxon_name(taxonomy, taxid, best_accession.get(taxid)))}</h2>'
+            f'<h2>{_escape(_taxon_name(taxonomy, taxid))}</h2>'
             f'<span class="taxon-rank">{_escape(rank_label)}</span>'
             "</div>"
             f'<code>taxid:{_escape(taxid)}</code></header>'
