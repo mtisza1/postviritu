@@ -244,6 +244,16 @@ Provenance columns include `esviritu_species`, `esviritu_subspecies`,
 Assemblies skipped by `--taxa-filter` retain their original taxonomy and have
 `postviritu_decision` set to `taxa_filtered`.
 
+### EsViritu versions
+
+Both the pre-1.3 and the EsViritu >= 1.3 output layouts are accepted. For 1.3+,
+consensus headers of the form `{Accession}_{sample}_consensus` are mapped back
+to the info-table Accession. The new `adj_taxonomy` and
+`consensus_ref_identity` columns are also carried through to the rewritten
+tables unchanged, as EsViritu provenance. When an assembly has no postviritu
+hit, species/subspecies thresholds use `consensus_ref_identity`, falling back
+to `avg_read_identity`, as EsViritu >= 1.3 does.
+
 ## Status / out of scope
 
 The package implements both the `mmseqs2` and Biopython remote BLAST backends

@@ -115,7 +115,17 @@ def run_sample(
     info_df = read_tsv(sample.info)
     params = load_params(sample.params)
     spthresh, subspthresh = get_thresholds(params)
-    consensus_seqs = parse_consensus_fasta(sample.consensus)
+    consensus_seqs = parse_consensus_fasta(sample.consensus, sample.prefix)
+    info_accessions = set(info_df["Accession"].to_list())
+    if consensus_seqs and not info_accessions.intersection(consensus_seqs):
+        logger.warning(
+            "%s: none of the %d consensus record name(s) (e.g. '%s') match an "
+            "Accession in the info table; the consensus FASTA header format may "
+            "not be supported",
+            sample.prefix,
+            len(consensus_seqs),
+            next(iter(consensus_seqs)),
+        )
 
     included_info, excluded_info = _split_info_by_taxa_filter(
         info_df, config.taxa_filter
@@ -147,10 +157,10 @@ def run_sample(
     if included_seqs:
         tmp_dir = config.tmp_dir or os.path.join(outdir, f"{sample.prefix}_tmp")
         os.makedirs(tmp_dir, exist_ok=True)
-        query_fasta = sample.consensus
-        if filter_active:
-            query_fasta = os.path.join(tmp_dir, f"{sample.prefix}_query.fasta")
-            write_fasta(included_seqs, query_fasta)
+        # Always align a rewritten FASTA named by Accession, so no EsViritu
+        # header format ever reaches the aligners' output.
+        query_fasta = os.path.join(tmp_dir, f"{sample.prefix}_query.fasta")
+        write_fasta(included_seqs, query_fasta)
         query_nonN_len = {
             acc: canonical_base_count(seq) for acc, seq in included_seqs.items()
         }

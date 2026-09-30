@@ -117,3 +117,68 @@ def test_report_proposed_taxonomy_matches_thresholded_tax_profile(
     proposed = html.unescape(page.split("Proposed taxonomy", 1)[1].split("</div>", 1)[0])
     assert "subspecies</b> unclassified_Reassigned virus sp." in proposed
     assert "Reassigned strain X" not in proposed
+
+
+def _reassigning_run(data_dir, prefix, tmp_path, pct_identity=0.995, mode="scratch"):
+    sample = SamplePaths(prefix=prefix, directory=data_dir)
+    hits = make_hits(
+        [
+            {
+                "query": "OR777233.1", "target": "dbhit", "taxid": "999",
+                "pct_identity": pct_identity, "aln_length": 33000,
+                "query_length": 33806, "query_coverage": 0.98,
+                "evalue": 1e-99, "bitscore": 6000.0,
+            }
+        ]
+    )
+    taxonomy = FakeTaxonomy(
+        rank_table={
+            "999": {
+                "superkingdom": "Viruses", "genus": "Mastadenovirus",
+                "species": "Reassigned virus sp.", "subspecies": "Reassigned strain X",
+            }
+        }
+    )
+    return run_sample(sample, aligner=FakeAligner(hits), taxonomy=taxonomy,
+                      outdir=str(tmp_path / "out"), config=RunConfig(mode=mode))
+
+
+def test_run_sample_handles_esviritu_v13_outputs(example_v13_data_dir, example_prefix, tmp_path):
+    paths = _reassigning_run(example_v13_data_dir, example_prefix, tmp_path)
+
+    info = read_tsv(paths["info"])
+    row = info.filter(pl.col("Accession") == "OR777233.1").row(0, named=True)
+    # The new '{Accession}_{sample}_consensus' header was matched to the info row.
+    assert row["species"] == "s__Reassigned virus sp."
+    assert row["postviritu_decision"] == "assigned"
+    assert {"adj_taxonomy", "consensus_ref_identity"} <= set(info.columns)
+
+    assem = read_tsv(paths["assembly_summary"])
+    cols = assem.columns
+    assert cols.index("adj_taxonomy") == cols.index("subspecies") + 1
+    assert cols.index("consensus_ref_identity") == cols.index("avg_read_identity") + 1
+    assert assem["consensus_ref_identity"].to_list() == [0.93]
+
+    tax = read_tsv(paths["tax_profile"])
+    assert tax.columns[-2:] == ["consensus_ref_identity", "assembly_list"]
+    # Hit identity (99.5%) still drives thresholding when there is a hit.
+    assert tax["subspecies"].to_list() == ["t__Reassigned strain X"]
+
+
+def test_old_esviritu_outputs_keep_old_schema(example_data_dir, example_prefix, tmp_path):
+    paths = _reassigning_run(example_data_dir, example_prefix, tmp_path)
+    for key in ("assembly_summary", "tax_profile"):
+        cols = read_tsv(paths[key]).columns
+        assert "consensus_ref_identity" not in cols and "adj_taxonomy" not in cols
+
+
+def test_no_hit_threshold_falls_back_to_consensus_ref_identity(
+    example_v13_data_dir, example_prefix, tmp_path
+):
+    """Like EsViritu >= 1.3: consensus_ref_identity (0.93) before avg_read_identity (0.97)."""
+    sample = SamplePaths(prefix=example_prefix, directory=example_v13_data_dir)
+    paths = run_sample(sample, FakeAligner(make_hits([])), FakeTaxonomy(),
+                       str(tmp_path / "out"), RunConfig(mode="disagree"))
+
+    tax = read_tsv(paths["tax_profile"])
+    assert tax["subspecies"].to_list() == ["t__unclassified_OrigSp1"]
