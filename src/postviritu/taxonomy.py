@@ -537,6 +537,58 @@ class Taxonomy:
         return str(result)
 
 
+TAXA_FILTER_ALL = "all"
+
+# Default include-list: pathogens of high public-health concern, matched
+# against the original EsViritu lineage. Kept in code rather than a data file
+# so it cannot go missing from an installed package.
+HIGH_CONCERN_TAXA: Dict[str, List[str]] = {
+    "species": [
+        "s__betacoronavirus pandemicum",
+        "s__Orthoflavivirus denguei",
+        "s__Orthoflavivirus kyasanurense",
+        "s__Orthoflavivirus nilense",
+        "s__Orthoflavivirus zikaense",
+        "s__Alphavirus chikungunya",
+        "s__Orthobunyavirus oropoucheense",
+        "s__Orthoflavivirus louisense",
+        "s__Venezuelan equine encephalitis virus",
+        "s__Eastern equine encephalitis virus",
+        "s__Orthoflavivirus flavi",
+        "s__Middle East respiratory syndrome-related coronavirus",
+        "s__Orthonairovirus haemorrhagiae",
+        "s__Mammarenavirus lassaense",
+        "s__Phlebovirus riftense",
+        "s__Lentivirus humimdef1",
+        "s__Lentivirus humimdef2",
+        "s__Hepacivirus hominis",
+        "s__Morbillivirus hominis",
+        "s__Orthorubulavirus parotitidis",
+        "s__Orthopoxvirus variola",
+        "s__Orthopoxvirus monkeypox",
+    ],
+    "genus": [
+        "g__Ebolavirus",
+        "g__Orthomarburgvirus",
+        "g__Henipavirus",
+        "g__Mammarenavirus",
+        "g__Orthohantavirus",
+        "g__Alphavirus",
+        "g__Alphainfluenzavirus",
+    ],
+    "subspecies": [
+        "t__Enterovirus A71",
+        "t__enterovirus D68",
+        "t__Poliovirus 1",
+        "t__Poliovirus 2",
+        "t__Poliovirus 3",
+        "t__Human poliovirus 1",
+        "t__Human poliovirus 2",
+        "t__Human poliovirus 3",
+    ],
+}
+
+
 class TaxaFilter:
     """Include-list filter for query assemblies based on original EsViritu taxonomy.
 
@@ -630,6 +682,19 @@ class TaxaFilter:
         if data is None:
             data = {}
         return cls(data)
+
+    @classmethod
+    def from_spec(cls, spec: Optional[str]) -> Optional["TaxaFilter"]:
+        """Resolve a ``--taxa-filter`` value.
+
+        ``None`` selects the built-in :data:`HIGH_CONCERN_TAXA`, ``"all"``
+        (case-insensitive) disables filtering, and anything else is a YAML path.
+        """
+        if spec is None:
+            return cls(HIGH_CONCERN_TAXA)
+        if spec.strip().lower() == TAXA_FILTER_ALL:
+            return None
+        return cls.from_yaml(spec)
 
     def matches(self, lineage: Dict[str, str]) -> bool:
         """Return True if ``lineage`` matches the include list."""

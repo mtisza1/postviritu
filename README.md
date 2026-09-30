@@ -135,17 +135,23 @@ supplying `--vvsearch-email` is recommended for large batches.
 | `--bitscore-tie-frac` | `0.99` | Hits with bitscore ≥ frac × max are "tied" |
 | `--threads` | `1` | Threads for mmseqs2 |
 | `--keep-temp` | off | Keep intermediate files |
-| `--taxa-filter` | off | YAML file of taxa to include (see below) |
+| `--taxa-filter` | high-concern list | YAML file of taxa to include, or `all` (see below) |
 | `--vvsearch` / `--no-vvsearch` | on | Supplement viral subspecies with NCBI genotypes |
 | `--vvsearch-email` | none | Contact address sent with `vvsearch2` requests |
 | `--vvsearch-timeout` | `10` | Per-request timeout in seconds |
 
 ### Process only selected taxa
 
-Because `postviritu` is most useful for a subset of predicted taxa, you can
-provide a YAML include-list. Only assemblies whose original EsViritu taxonomy
-matches an entry are re-aligned and reassigned; all others are copied through
-unchanged.
+Because `postviritu` is most useful for a subset of predicted taxa, only
+assemblies whose original EsViritu taxonomy matches an include-list are
+re-aligned and reassigned; all others are copied through unchanged.
+
+By default the built-in list of high-concern pathogens is used
+(`HIGH_CONCERN_TAXA` in `src/postviritu/taxonomy.py`): e.g. SARS-CoV-2, MERS,
+dengue, Zika, West Nile, chikungunya, mpox, variola, HIV, measles, mumps,
+Lassa, CCHF, Rift Valley fever, the Ebola, Marburg, Henipa, hanta and
+influenza A genera, polioviruses, EV-A71 and EV-D68. Pass `--taxa-filter all`
+to process every assembly, or a YAML file to use your own list.
 
 Create a file such as `taxa_to_process.yaml`:
 
@@ -179,7 +185,7 @@ rejects a filter file that names ranks but lists no taxa under any of them
 (`species:` with an empty or omitted list), one that is not a rank -> list
 mapping (a bare top-level list), and entries filed under the wrong rank
 (`genus: ["s__Human mastadenovirus A"]`). An empty file is still valid and
-keeps all assemblies, as does omitting `--taxa-filter`.
+keeps all assemblies, as does `--taxa-filter all`.
 
 ## Outputs
 

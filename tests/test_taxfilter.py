@@ -273,3 +273,35 @@ def test_run_sample_taxa_filter_excludes_all_keeps_original(tmp_path, caplog):
         r.levelname == "WARNING" and "S1: no assemblies matched the taxa filter" in r.getMessage()
         for r in caplog.records
     )
+
+
+def test_taxa_filter_default_is_high_concern_list():
+    tf = TaxaFilter.from_spec(None)
+    assert tf.matches({"species": "s__Orthopoxvirus monkeypox"})
+    assert tf.matches({"species": "s__Betacoronavirus pandemicum"})
+    assert tf.matches({"genus": "g__Ebolavirus"})
+    assert tf.matches({"species": "s__Enterovirus coxsackiepol", "subspecies": "t__Poliovirus 2"})
+    assert not tf.matches({"species": "s__Human mastadenovirus F", "genus": "g__Mastadenovirus"})
+
+
+@pytest.mark.parametrize("spec", ["all", "ALL", " All "])
+def test_taxa_filter_all_disables_filtering(spec):
+    assert TaxaFilter.from_spec(spec) is None
+
+
+def test_taxa_filter_spec_path_loads_yaml(tmp_path):
+    path = tmp_path / "taxa.yaml"
+    path.write_text(yaml.safe_dump({"species": ["s__KeepSp"]}))
+    tf = TaxaFilter.from_spec(str(path))
+    assert tf.matches({"species": "s__KeepSp"})
+    assert not tf.matches({"species": "s__Orthopoxvirus monkeypox"})
+
+
+def test_cli_defaults_to_high_concern_filter():
+    from postviritu.cli import _build_parser, _taxa_filter
+
+    parser = _build_parser()
+    base = ["blastn", "--input-dir", "in", "--outdir", "out"]
+    default = _taxa_filter(parser.parse_args(base))
+    assert default is not None and default.matches({"genus": "g__Henipavirus"})
+    assert _taxa_filter(parser.parse_args(base + ["--taxa-filter", "all"])) is None
