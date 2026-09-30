@@ -32,6 +32,35 @@ This installs `mmseqs2`, `taxonkit` + `pytaxonkit` (>= 0.10), `polars`,
 [`pytaxonkit`](https://github.com/bioforensics/pytaxonkit) library, which wraps
 the `taxonkit` binary.
 
+### NCBI taxdump
+
+`postviritu` resolves taxids to lineages with `taxonkit`, which needs a local
+copy of the NCBI taxonomy dump (`names.dmp`, `nodes.dmp`, `delnodes.dmp`,
+`merged.dmp`). Download and verify it, then extract those four files:
+
+```bash
+mkdir -p /path/to/ncbi_taxdump_dir
+cd /path/to/ncbi_taxdump_dir
+wget https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz \
+     https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz.md5
+md5sum -c taxdump.tar.gz.md5
+tar -xzf taxdump.tar.gz names.dmp nodes.dmp delnodes.dmp merged.dmp
+```
+
+Pass this directory with `--taxdump /path/to/ncbi_taxdump_dir`. Alternatively,
+extract the files into `~/.taxonkit`, which `taxonkit` uses when `--taxdump`
+is omitted. The extended
+[`new_taxdump`](https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/new_taxdump/new_taxdump.tar.gz)
+archive also works, since it contains the same four files.
+
+To check the dump, `echo 2697049 | taxonkit lineage --data-dir /path/to/ncbi_taxdump_dir`
+should print the SARS-CoV-2 lineage.
+
+NCBI updates the taxonomy continually, so refresh the dump periodically.
+Otherwise hits to references newer than your dump may resolve to unknown
+taxids, and older dumps use outdated names (e.g. pre-binomial virus species
+names). Use the same dump for `setup-db` and for later runs.
+
 ## Usage
 
 ### 1. Build the search database (once)
