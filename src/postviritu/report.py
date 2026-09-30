@@ -219,12 +219,15 @@ def _query_page(
     taxonomy: Taxonomy,
     consensus_seqs: Optional[Dict[str, str]],
     tie_frac: float,
+    proposed_lineages: Dict[str, Dict[str, str]],
 ) -> str:
     query = str(row.get("Accession") or "")
     assembly = row.get("Assembly")
     original = {rank: row.get(rank) for rank in TAX_RANKS}
     resolution = resolutions.get(assembly)
-    proposed = resolution.lineage if resolution else original
+    proposed = proposed_lineages.get(assembly) or (
+        resolution.lineage if resolution else original
+    )
     decision = resolution.decision if resolution else "unchanged"
     query_hits = (
         hits.filter(pl.col("query") == query).sort("bitscore", descending=True)
@@ -276,8 +279,15 @@ def write_html_report(
     taxonomy: Taxonomy,
     consensus_seqs: Optional[Dict[str, str]] = None,
     tie_frac: float = 0.99,
+    proposed_lineages: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> str:
-    """Write a self-contained, paginated report and return its path."""
+    """Write a self-contained, paginated report and return its path.
+
+    ``proposed_lineages`` ({Assembly: lineage}) should be the identity-
+    thresholded lineages used for the tax_profile, so the report never names
+    a species/subspecies the tax_profile withholds. Assemblies missing from
+    it fall back to the raw resolution lineage.
+    """
     filtered_assemblies = {
         asm for asm, res in resolutions.items() if res.decision == "taxa_filtered"
     }
@@ -288,7 +298,16 @@ def write_html_report(
         )
 
     pages = "".join(
-        _query_page(index, row, hits, resolutions, taxonomy, consensus_seqs, tie_frac)
+        _query_page(
+            index,
+            row,
+            hits,
+            resolutions,
+            taxonomy,
+            consensus_seqs,
+            tie_frac,
+            proposed_lineages or {},
+        )
         for index, row in enumerate(query_rows.iter_rows(named=True))
     )
 

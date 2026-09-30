@@ -30,6 +30,12 @@ PROVENANCE_COLUMNS = [
 ]
 
 
+# Optional EsViritu >= 1.3 per-Assembly columns carried into assembly_summary:
+# ``adj_taxonomy`` (EsViritu adjusted its own call via consensus LCA) and
+# ``consensus_ref_identity`` (consensus vs. EsViritu reference identity).
+ASSEMBLY_CONSTANT_COLUMNS = ["adj_taxonomy", "consensus_ref_identity"]
+
+
 def resolutions_to_df(resolutions: Dict[str, AssemblyResolution]) -> pl.DataFrame:
     """Build a per-Assembly DataFrame of new lineage + provenance + identity."""
     rows = []
@@ -110,10 +116,13 @@ def build_assembly_summary(new_info: pl.DataFrame) -> pl.DataFrame:
         "Asm_length",
         *TAX_RANKS,
     ]
+    # EsViritu >= 1.3 columns, constant within an Assembly.
+    optional = [c for c in ASSEMBLY_CONSTANT_COLUMNS if c in df.columns]
     agg = df.group_by(group_keys).agg(
         pl.col("read_count").sum().alias("read_count"),
         pl.col("covered_bases").sum().alias("covered_bases"),
         pl.col("avg_read_identity").mean().alias("avg_read_identity"),
+        *[pl.col(c).first().alias(c) for c in optional],
         pl.col("Accession").cast(pl.Utf8).alias("Accession"),
         pl.col("Segment").cast(pl.Utf8).alias("Segment"),
     )
@@ -133,9 +142,11 @@ def build_assembly_summary(new_info: pl.DataFrame) -> pl.DataFrame:
         "Assembly",
         "Asm_length",
         *TAX_RANKS,
+        *[c for c in ["adj_taxonomy"] if c in optional],
         "read_count",
         "covered_bases",
         "avg_read_identity",
+        *[c for c in ["consensus_ref_identity"] if c in optional],
         "Accession",
         "Segment",
         "RPKMF",
@@ -143,6 +154,36 @@ def build_assembly_summary(new_info: pl.DataFrame) -> pl.DataFrame:
     return agg.select(column_order).sort(
         ["family", "genus", "species", "Assembly"]
     )
+
+
+def thresholded_lineages(
+    assembly_summary: pl.DataFrame,
+    resolutions: Dict[str, AssemblyResolution],
+    spthresh: float = 0.90,
+    subspthresh: float = 0.95,
+) -> Dict[str, Dict[str, str]]:
+    """Return {Assembly: lineage} after species/subspecies identity thresholding.
+
+    Thresholding uses the new consensus->hit identity (resolution.pct_identity).
+    When no hit identity is available it falls back, like EsViritu >= 1.3, to
+    EsViritu's consensus_ref_identity and then to the assembly's mean
+    avg_read_identity.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for row in assembly_summary.iter_rows(named=True):
+        res = resolutions.get(row["Assembly"])
+        identity = None
+        if res is not None and res.pct_identity is not None:
+            identity = res.pct_identity
+        elif row.get("consensus_ref_identity") is not None:
+            identity = row["consensus_ref_identity"]
+        elif row.get("avg_read_identity") is not None:
+            identity = row["avg_read_identity"]
+        lineage = {r: row[r] for r in TAX_RANKS}
+        out[row["Assembly"]] = apply_identity_thresholds(
+            lineage, identity, spthresh, subspthresh
+        )
+    return out
 
 
 def build_tax_profile(
@@ -153,37 +194,32 @@ def build_tax_profile(
 ) -> pl.DataFrame:
     """Build the tax_profile, applying identity thresholding per assembly.
 
-    Thresholding uses the new consensus->hit identity (resolution.pct_identity),
-    falling back to the assembly's mean avg_read_identity when no hit identity
-    is available.
+    See :func:`thresholded_lineages` for the identity used.
     """
     filtered_reads = _filtered_reads(new_info)
     assem = build_assembly_summary(new_info)
 
     # Apply per-assembly species/subspecies thresholding to the lineage.
+    lineages = thresholded_lineages(assem, resolutions, spthresh, subspthresh)
     thresholded_rows: List[dict] = []
     for row in assem.iter_rows(named=True):
-        res = resolutions.get(row["Assembly"])
-        identity = None
-        if res is not None and res.pct_identity is not None:
-            identity = res.pct_identity
-        elif row.get("avg_read_identity") is not None:
-            identity = row["avg_read_identity"]
-        lineage = {r: row[r] for r in TAX_RANKS}
-        lineage = apply_identity_thresholds(
-            lineage, identity, spthresh, subspthresh
-        )
         new_row = dict(row)
-        new_row.update(lineage)
+        new_row.update(lineages[row["Assembly"]])
         thresholded_rows.append(new_row)
 
     assem_t = pl.DataFrame(thresholded_rows, schema=assem.schema)
 
     group_keys = ["sample_ID", "filtered_reads_in_sample", *TAX_RANKS]
+    has_cons_id = "consensus_ref_identity" in assem_t.columns
     tax = assem_t.group_by(group_keys).agg(
         pl.col("read_count").sum().alias("read_count"),
         pl.col("RPKMF").sum().alias("RPKMF"),
         pl.col("avg_read_identity").mean().alias("avg_read_identity"),
+        *(
+            [pl.col("consensus_ref_identity").mean().alias("consensus_ref_identity")]
+            if has_cons_id
+            else []
+        ),
         pl.col("Assembly").unique().alias("assembly_list"),
     )
     tax = tax.with_columns(pl.col("assembly_list").list.join(","))
@@ -195,6 +231,7 @@ def build_tax_profile(
         "read_count",
         "RPKMF",
         "avg_read_identity",
+        *(["consensus_ref_identity"] if has_cons_id else []),
         "assembly_list",
     ]
     return tax.select(column_order).sort(

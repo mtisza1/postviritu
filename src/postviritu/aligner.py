@@ -9,13 +9,16 @@ downstream taxonomy/reassignment logic.
 
 from __future__ import annotations
 
+import html
 import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 import zipfile
 from abc import ABC, abstractmethod
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -557,6 +560,41 @@ def _blast_xml_documents(data: bytes) -> List[bytes]:
     return [doc for doc in documents if b"<BlastOutput2" in doc or b"<BlastOutput>" in doc]
 
 
+# NCBI kills searches that exceed its per-request CPU budget and reports it as
+# a per-query ``<message>`` with no hits, which is indistinguishable from a
+# genuine "no hits" unless the message is checked.
+_CPU_LIMIT_MESSAGE = b"CPU usage limit was exceeded"
+_QUERY_TITLE = re.compile(rb"<query-title>(.*?)</query-title>", re.S)
+_SEARCH_MESSAGE = re.compile(rb"\s*<message>(.*?)</message>", re.S)
+
+
+def _query_key(name: str) -> str:
+    return name.split()[0].removesuffix("_consensus") if name.strip() else ""
+
+
+def _cpu_limited_queries(data: bytes, names: List[str]) -> List[str]:
+    """Return the ``names`` whose QBLAST result reports the NCBI CPU limit.
+
+    If a CPU-limited result cannot be mapped to exactly one query, every name
+    is returned so that nothing is silently reported as having no hits.
+    """
+    by_key = {_query_key(name): name for name in names}
+    failed = set()
+    for document in _blast_xml_documents(data):
+        if _CPU_LIMIT_MESSAGE not in document:
+            continue
+        titles = _QUERY_TITLE.findall(document)
+        name = (
+            by_key.get(_query_key(html.unescape(titles[0].decode(errors="replace"))))
+            if len(titles) == 1
+            else None
+        )
+        if name is None:
+            return list(names)
+        failed.add(name)
+    return [name for name in names if name in failed]
+
+
 def _hsp_rows(record) -> Iterable[dict]:
     """Yield one tabular-style row per HSP of a parsed ``Bio.Blast.Record``."""
     query = record.query
@@ -606,6 +644,10 @@ def parse_blastn(
     is stripped from the query name. Identity and coverage are recomputed from
     the aligned sequences to exclude N positions, just as for the mmseqs2
     backend.
+
+    Per-query ``<message>`` elements (which Biopython cannot parse) are
+    removed; server errors other than the CPU limit, which the caller retries,
+    are logged as warnings.
     """
     from Bio import Blast
 
@@ -615,9 +657,21 @@ def parse_blastn(
     with open(path, "rb") as handle:
         documents = _blast_xml_documents(handle.read())
 
+    cleaned = []
+    for document in documents:
+        for message in _SEARCH_MESSAGE.findall(document):
+            if b"Error" in message and _CPU_LIMIT_MESSAGE not in message:
+                titles = _QUERY_TITLE.findall(document)
+                logger.warning(
+                    "BLAST reported an error for %s: %s",
+                    titles[0].decode(errors="replace") if titles else "a query",
+                    html.unescape(message.decode(errors="replace")).strip(),
+                )
+        cleaned.append(_SEARCH_MESSAGE.sub(b"", document))
+
     rows = [
         row
-        for document in documents
+        for document in cleaned
         for record in Blast.parse(io.BytesIO(document))
         for row in _hsp_rows(record)
     ]
@@ -648,6 +702,14 @@ class BlastnAligner(Aligner):
 
     Results are requested as XML2 (which, unlike XML, carries the target
     taxids) and parsed with :func:`Bio.Blast.parse`.
+
+    Biopython has no QBLAST timeout; it only warns once a request has been
+    polled for 10 minutes. That warning is escalated to an error and the
+    batch is re-submitted (new RID) up to ``max_retries`` times.
+
+    Queries whose search NCBI aborted for exceeding its CPU limit are
+    re-submitted in successively halved batches, down to a single query; a
+    query that still fails alone is reported with a warning and no hits.
     """
 
     def __init__(
@@ -656,11 +718,60 @@ class BlastnAligner(Aligner):
         max_target_seqs: int = 300,
         batch_size: int = 3,
         extra_args: Optional[Dict[str, object]] = None,
+        max_retries: int = 3,
     ):
         self.db = db
         self.max_target_seqs = max_target_seqs
         self.batch_size = batch_size
         self.extra_args = extra_args or {}
+        self.max_retries = max_retries
+
+    def _qblast(self, query: str):
+        """Run one QBLAST request, raising ``BiopythonWarning`` after 10 minutes."""
+        from Bio import Blast, BiopythonWarning
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "error",
+                message=r"BLAST request .* is taking longer than",
+                category=BiopythonWarning,
+            )
+            return Blast.qblast(
+                "blastn",
+                self.db,
+                query,
+                format_type="XML2",
+                hitlist_size=self.max_target_seqs,
+                alignments=self.max_target_seqs,
+                descriptions=self.max_target_seqs,
+                **self.extra_args,
+            )
+
+    def _submit(self, query: str, label: str) -> Tuple[bytes, str]:
+        """Run a QBLAST request, re-submitting on timeout; return (result, RID)."""
+        from Bio import BiopythonWarning
+
+        attempts = self.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            attempt_started = time.monotonic()
+            try:
+                result_stream = self._qblast(query)
+                break
+            except BiopythonWarning as exc:
+                if attempt == attempts:
+                    raise
+                logger.warning(
+                    "%s: attempt %d/%d timed out after %s (%s); re-submitting",
+                    label,
+                    attempt,
+                    attempts,
+                    _elapsed(attempt_started),
+                    exc,
+                )
+        try:
+            return result_stream.read(), getattr(result_stream, "rid", "n/a")
+        finally:
+            result_stream.close()
 
     def search(
         self,
@@ -672,8 +783,6 @@ class BlastnAligner(Aligner):
         result_name: str = "result.m8",
         query_nonN_len: Optional[Dict[str, int]] = None,
     ) -> pl.DataFrame:
-        from Bio import Blast
-
         if tmp_dir is None:
             tmp_root = tempfile.mkdtemp(prefix="postviritu_blastn_")
         else:
@@ -705,17 +814,12 @@ class BlastnAligner(Aligner):
             done_bp = 0
             batch_hits = []
             for i, batch in enumerate(batches):
-                batch_fasta = os.path.join(tmp_root, f"batch_{i}.fasta")
-                batch_out = os.path.join(tmp_root, f"batch_{i}.xml2.zip")
-                write_fasta(dict(batch), batch_fasta)
-                batch_fastas.append(batch_fasta)
-
+                label = f"BLASTN batch {i + 1}/{len(batches)}"
                 batch_bp = sum(len(seq) for _, seq in batch)
                 logger.info(
-                    "BLASTN batch %d/%d: submitting %d quer%s (%s bp; %.1f%% of queries, "
+                    "%s: submitting %d quer%s (%s bp; %.1f%% of queries, "
                     "%.1f%% of bp): %s",
-                    i + 1,
-                    len(batches),
+                    label,
                     len(batch),
                     "y" if len(batch) == 1 else "ies",
                     f"{batch_bp:,}",
@@ -724,47 +828,76 @@ class BlastnAligner(Aligner):
                     ", ".join(name for name, _ in batch),
                 )
                 batch_started = time.monotonic()
-                try:
-                    with open(batch_fasta) as query_handle:
-                        result_stream = Blast.qblast(
-                            "blastn",
-                            self.db,
-                            query_handle.read(),
-                            format_type="XML2",
-                            hitlist_size=self.max_target_seqs,
-                            alignments=self.max_target_seqs,
-                            descriptions=self.max_target_seqs,
-                            **self.extra_args,
+                parts = [(f"batch_{i}", batch)]
+                rids: List[str] = []
+                part_hits = []
+                while parts:
+                    stem, part = parts.pop(0)
+                    part_fasta = os.path.join(tmp_root, f"{stem}.fasta")
+                    part_out = os.path.join(tmp_root, f"{stem}.xml2.zip")
+                    write_fasta(dict(part), part_fasta)
+                    batch_fastas.append(part_fasta)
+                    try:
+                        with open(part_fasta) as query_handle:
+                            result, rid = self._submit(query_handle.read(), label)
+                    except Exception as exc:
+                        logger.error(
+                            "%s failed after %s: %s: %s",
+                            label,
+                            _elapsed(batch_started),
+                            type(exc).__name__,
+                            exc,
                         )
-                        try:
-                            result = result_stream.read()
-                        finally:
-                            result_stream.close()
-                except Exception as exc:
-                    logger.error(
-                        "BLASTN batch %d/%d failed after %s: %s: %s",
-                        i + 1,
-                        len(batches),
-                        _elapsed(batch_started),
-                        type(exc).__name__,
-                        exc,
-                    )
-                    raise
-                with open(batch_out, "wb") as out_handle:
-                    out_handle.write(result)
-                parsed = parse_blastn(batch_out, query_nonN_len)
+                        raise
+                    rids.append(rid)
+                    with open(part_out, "wb") as out_handle:
+                        out_handle.write(result)
+                    parsed = parse_blastn(part_out, query_nonN_len)
+
+                    failed = _cpu_limited_queries(result, [name for name, _ in part])
+                    if failed:
+                        parsed = parsed.filter(
+                            ~pl.col("query").is_in([_query_key(name) for name in failed])
+                        )
+                        if len(part) == 1:
+                            logger.warning(
+                                "%s: %s exceeded NCBI's CPU usage limit even when searched "
+                                "alone (RID %s); it is reported without hits",
+                                label,
+                                failed[0],
+                                rid,
+                            )
+                        else:
+                            retry = [(name, seq) for name, seq in part if name in failed]
+                            mid = (len(retry) + 1) // 2
+                            halves = [retry] if len(retry) == 1 else [retry[:mid], retry[mid:]]
+                            logger.warning(
+                                "%s: NCBI's CPU usage limit was exceeded for %d/%d quer%s "
+                                "(RID %s); re-submitting %s in %d smaller batch(es)",
+                                label,
+                                len(failed),
+                                len(part),
+                                "y" if len(part) == 1 else "ies",
+                                rid,
+                                "it" if len(failed) == 1 else "them",
+                                len(halves),
+                            )
+                            parts = [
+                                (f"{stem}_{k}", half) for k, half in enumerate(halves)
+                            ] + parts
+                    part_hits.append(parsed)
+                parsed = pl.concat(part_hits)
                 batch_hits.append(parsed)
 
                 done_queries += len(batch)
                 done_bp += batch_bp
                 logger.info(
-                    "BLASTN batch %d/%d: done in %s (RID %s): %d alignment(s) to %d "
+                    "%s: done in %s (RID %s): %d alignment(s) to %d "
                     "reference(s) for %d/%d quer%s with hits. Progress: %d/%d queries "
                     "(%.1f%%), %.1f%% of bp, %s elapsed",
-                    i + 1,
-                    len(batches),
+                    label,
                     _elapsed(batch_started),
-                    getattr(result_stream, "rid", "n/a"),
+                    ", ".join(rids),
                     parsed.height,
                     parsed["target"].n_unique(),
                     parsed["query"].n_unique(),

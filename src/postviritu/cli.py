@@ -17,6 +17,11 @@ from . import __version__
 
 logger = logging.getLogger("postviritu")
 
+_TAXA_FILTER_HELP = (
+    "YAML file of taxa to include, or 'all' to process every assembly "
+    "(default: built-in list of high-concern pathogens)."
+)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -96,11 +101,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="NCBI taxdump dir for pytaxonkit (default: from DB manifest, "
         "else taxonkit's ~/.taxonkit).",
     )
-    p_run.add_argument(
-        "--taxa-filter",
-        default=None,
-        help="YAML file of taxa to include (default: process all).",
-    )
+    p_run.add_argument("--taxa-filter", default=None, help=_TAXA_FILTER_HELP)
     p_run.add_argument(
         "--vvsearch",
         action=argparse.BooleanOptionalAction,
@@ -161,11 +162,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="NCBI taxdump dir for pytaxonkit (default: taxonkit's ~/.taxonkit).",
     )
-    p_blastn.add_argument(
-        "--taxa-filter",
-        default=None,
-        help="YAML file of taxa to include (default: process all).",
-    )
+    p_blastn.add_argument("--taxa-filter", default=None, help=_TAXA_FILTER_HELP)
     p_blastn.add_argument(
         "--tmp-dir",
         default=None,
@@ -192,6 +189,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum target sequences reported per query (default: 300).",
     )
     p_blastn.add_argument(
+        "--blast-retries",
+        type=int,
+        default=3,
+        help="Times to re-submit a remote BLASTN batch that is still running "
+        "after 10 minutes (default: 3).",
+    )
+    p_blastn.add_argument(
         "--vvsearch",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -214,6 +218,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_blastn.set_defaults(func=_cmd_blastn)
 
     return parser
+
+
+def _taxa_filter(args: argparse.Namespace):
+    """Resolve --taxa-filter (built-in high-concern list, 'all', or a YAML path)."""
+    from .taxonomy import TaxaFilter
+
+    taxa_filter = TaxaFilter.from_spec(args.taxa_filter)
+    if args.taxa_filter is None:
+        logger.info(
+            "taxa filter: built-in high-concern pathogen list "
+            "(use --taxa-filter all to process every assembly)"
+        )
+    elif taxa_filter is None:
+        logger.info("taxa filter: none (processing all assemblies)")
+    else:
+        logger.info("taxa filter: %s", args.taxa_filter)
+    return taxa_filter
 
 
 def _vvsearch_config(args: argparse.Namespace):
@@ -246,7 +267,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .aligner import Mmseqs2Aligner
     from .run import RunConfig, run_batch
     from .setup_db import load_manifest, target_db_path
-    from .taxonomy import TaxaFilter, Taxonomy
+    from .taxonomy import Taxonomy
 
     manifest = load_manifest(args.db)
     target_db = target_db_path(args.db)
@@ -257,7 +278,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     taxonomy = Taxonomy(
         data_dir=taxdump, threads=args.threads, vvsearch=_vvsearch_config(args)
     )
-    taxa_filter = TaxaFilter.from_yaml(args.taxa_filter) if args.taxa_filter else None
     config = RunConfig(
         mode=args.mode,
         min_identity=args.min_identity,
@@ -268,7 +288,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         realign_ties=args.realign_ties,
         tmp_dir=args.tmp_dir,
         keep_alignments=args.keep_alignments,
-        taxa_filter=taxa_filter,
+        taxa_filter=_taxa_filter(args),
     )
     processed = run_batch(
         input_dir=args.input_dir,
@@ -285,17 +305,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_blastn(args: argparse.Namespace) -> int:
     from .aligner import BlastnAligner
     from .run import RunConfig, run_batch
-    from .taxonomy import TaxaFilter, Taxonomy
+    from .taxonomy import Taxonomy
 
     aligner = BlastnAligner(
         db=args.db,
         max_target_seqs=args.max_target_seqs,
         batch_size=args.batch_size,
+        max_retries=args.blast_retries,
     )
     taxonomy = Taxonomy(
         data_dir=args.taxdump, threads=args.threads, vvsearch=_vvsearch_config(args)
     )
-    taxa_filter = TaxaFilter.from_yaml(args.taxa_filter) if args.taxa_filter else None
     config = RunConfig(
         mode=args.mode,
         min_identity=args.min_identity,
@@ -306,7 +326,7 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
         realign_ties=args.realign_ties,
         tmp_dir=args.tmp_dir,
         keep_alignments=args.keep_alignments,
-        taxa_filter=taxa_filter,
+        taxa_filter=_taxa_filter(args),
     )
     processed = run_batch(
         input_dir=args.input_dir,

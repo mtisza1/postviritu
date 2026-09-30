@@ -2,6 +2,7 @@ import os
 
 from postviritu.io_esviritu import (
     SamplePaths,
+    consensus_accession,
     discover_sample_prefixes,
     get_thresholds,
     load_params,
@@ -53,3 +54,21 @@ def test_read_info_has_expected_columns(example_data_dir, example_prefix):
     df = read_tsv(sp.info)
     for col in ["Accession", "Assembly", "species", "subspecies", "read_count"]:
         assert col in df.columns
+
+
+def test_consensus_accession_handles_old_and_new_esviritu_headers():
+    # EsViritu < 1.3: {Accession}_consensus
+    assert consensus_accession("NC_045512.2_consensus", "E4ERFK_133") == "NC_045512.2"
+    # EsViritu >= 1.3: {Accession}_{sample}_consensus (both may contain '_')
+    assert consensus_accession("NC_045512.2_E4ERFK_133_consensus", "E4ERFK_133") == "NC_045512.2"
+    assert consensus_accession("M32305.1_E4ERFK.p2176_consensus", "E4ERFK.p2176") == "M32305.1"
+    # No suffix at all is left untouched.
+    assert consensus_accession("M32305.1", "E4ERFK_133") == "M32305.1"
+
+
+def test_parse_consensus_new_header_format(example_v13_data_dir, example_prefix):
+    sp = SamplePaths(prefix=example_prefix, directory=example_v13_data_dir)
+    assert sorted(parse_consensus_fasta(sp.consensus, example_prefix)) == [
+        "OR777233.1",
+        "Y15173.1",
+    ]

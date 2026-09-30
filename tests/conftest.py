@@ -26,8 +26,13 @@ def _no_live_http(monkeypatch):
 EXAMPLE_PREFIX = "AYWM5R.p2126"
 
 
-def _make_example_data(root: str, prefix: str) -> str:
-    """Create a minimal synthetic EsViritu sample directory for integration tests."""
+def _make_example_data(root: str, prefix: str, esviritu_v13: bool = False) -> str:
+    """Create a minimal synthetic EsViritu sample directory for integration tests.
+
+    ``esviritu_v13`` writes the EsViritu >= 1.3 layout: ``adj_taxonomy`` and
+    ``consensus_ref_identity`` columns and ``{Accession}_{sample}_consensus``
+    FASTA headers.
+    """
     from postviritu.io_esviritu import write_fasta
 
     os.makedirs(root, exist_ok=True)
@@ -87,6 +92,11 @@ def _make_example_data(root: str, prefix: str) -> str:
         ],
         schema_overrides={"Segment": pl.Utf8},
     )
+    if esviritu_v13:
+        info = info.with_columns(
+            pl.lit(False).alias("adj_taxonomy"),
+            pl.lit(0.93).alias("consensus_ref_identity"),
+        )
     info.write_csv(
         os.path.join(root, f"{prefix}.detected_virus.info.tsv"), separator="\t"
     )
@@ -102,8 +112,9 @@ def _make_example_data(root: str, prefix: str) -> str:
 
     # Consensus FASTA with two accessions.
     consensus = os.path.join(root, f"{prefix}_final_consensus.fasta")
+    header = (lambda acc: f"{acc}_{prefix}_consensus") if esviritu_v13 else (lambda acc: acc)
     write_fasta(
-        {"OR777233.1": "ACGT" * 100, "Y15173.1": "TGCA" * 100},
+        {header("OR777233.1"): "ACGT" * 100, header("Y15173.1"): "TGCA" * 100},
         consensus,
     )
     return root
@@ -113,6 +124,13 @@ def _make_example_data(root: str, prefix: str) -> str:
 def example_data_dir(tmp_path_factory):
     root = tmp_path_factory.mktemp("example_data")
     _make_example_data(str(root), EXAMPLE_PREFIX)
+    return str(root)
+
+
+@pytest.fixture(scope="session")
+def example_v13_data_dir(tmp_path_factory):
+    root = tmp_path_factory.mktemp("example_v13_data")
+    _make_example_data(str(root), EXAMPLE_PREFIX, esviritu_v13=True)
     return str(root)
 
 

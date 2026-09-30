@@ -161,11 +161,25 @@ def get_thresholds(params: Dict) -> Tuple[float, float]:
     return spthresh, subspthresh
 
 
-def parse_consensus_fasta(path: str) -> Dict[str, str]:
+def consensus_accession(header: str, sample: Optional[str] = None) -> str:
+    """Recover the info-table Accession from a consensus FASTA record name.
+
+    EsViritu >= 1.3 names records ``{Accession}_{sample}_consensus``; older
+    versions use ``{Accession}_consensus``. Both suffixes are stripped.
+    """
+    if sample:
+        suffix = f"_{sample}{CONSENSUS_HEADER_SUFFIX}"
+        if header.endswith(suffix):
+            return header[: -len(suffix)]
+    return header.removesuffix(CONSENSUS_HEADER_SUFFIX)
+
+
+def parse_consensus_fasta(path: str, sample: Optional[str] = None) -> Dict[str, str]:
     """Parse a consensus FASTA into {Accession: sequence}.
 
-    EsViritu names consensus records ``{Accession}_consensus``; the suffix is
-    stripped to recover the Accession used in the info table.
+    Record names are mapped back to info-table Accessions with
+    :func:`consensus_accession`; pass ``sample`` (the EsViritu sample name)
+    to handle the EsViritu >= 1.3 header format.
     """
     sequences: Dict[str, List[str]] = {}
     current: Optional[str] = None
@@ -175,11 +189,7 @@ def parse_consensus_fasta(path: str) -> Dict[str, str]:
             if not line:
                 continue
             if line.startswith(">"):
-                header = line[1:].split()[0]
-                accession = header
-                if header.endswith(CONSENSUS_HEADER_SUFFIX):
-                    accession = header[: -len(CONSENSUS_HEADER_SUFFIX)]
-                current = accession
+                current = consensus_accession(line[1:].split()[0], sample)
                 sequences[current] = []
             elif current is not None:
                 sequences[current].append(line)

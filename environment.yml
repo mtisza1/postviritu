@@ -7,7 +7,7 @@ dependencies:
   - polars>=1.0
   - pyyaml>=6.0
   - pandas>=1.0
-  - biopython>=1.89
+  - biopython>=1.87
   - mmseqs2>=15
   - taxonkit>=0.15
   - pytaxonkit>=0.10

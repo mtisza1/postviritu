@@ -483,6 +483,28 @@ def test_vvsearch_genotype_whitespace_is_sanitized(monkeypatch):
     assert "\n" not in lineage["subspecies"]
 
 
+def test_vvsearch_falls_back_to_lineage_when_no_genotype(monkeypatch):
+    tax = _virus_taxonomy(monkeypatch)
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(kwargs)
+        return _VVResponse(
+            [
+                {"AccVer_s": "OL672836.1", "Lineage_s": "BA.1"},
+                {"AccVer_s": "PP000001.1", "Lineage_s": "F.1", "Genotype_s": "IIb"},
+                {"AccVer_s": "PP000002.1", "Lineage_s": "AY.29", "Genotype_s": " "},
+            ]
+        )
+
+    monkeypatch.setattr("postviritu.taxonomy.requests.get", get)
+
+    assert tax.esviritu_lineage("999", "OL672836.1")["subspecies"] == "t__BA.1"
+    assert tax.esviritu_lineage("999", "PP000001.1")["subspecies"] == "t__IIb"
+    assert tax.esviritu_lineage("999", "PP000002.1")["subspecies"] == "t__AY.29"
+    assert calls[0]["params"]["fl"].split(",") == ["AccVer_s", "Genotype_s", "Lineage_s"]
+
+
 def test_vvsearch_whitespace_only_genotype_falls_back(monkeypatch):
     tax = _virus_taxonomy(monkeypatch)
     monkeypatch.setattr(
