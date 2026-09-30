@@ -1,20 +1,23 @@
 # postviritu
 
-`postviritu` is a Python CLI that post-processes [EsViritu](https://github.com/cmmr/EsViritu)
-output. It re-aligns EsViritu's reconstructed consensus genomes against a large
-NCBI nucleotide database (e.g. `core_nt`) using `mmseqs2`, re-derives taxonomy
-from the NCBI taxonomy (via `taxonkit`), supplements viral subspecies with
-NCBI Virus Variation genotypes when available, and rewrites EsViritu-format
-output tables.
+`postviritu` is a Python CLI that post-processes [EsViritu](https://github.com/cmmr/EsViritu) output. It re-aligns EsViritu's reconstructed consensus genomes against a large NCBI nucleotide database (e.g. `core_nt`) using `blastn` (remote query) or `mmseqs2`, (local query), re-derives taxonomy from the NCBI taxonomy (via `taxonkit`), supplements viral subspecies with NCBI Virus Variation genotypes when available, and provides a reviewable HTML report with proposed changes.
+
+> [!NOTE]
+> It is NOT recommended to use this tool to re-check all EsViritu taxonomy calls.
+> Rather, it is most useful for checking a select set of viruses that may be:
+> (A) public health concern.
+> (B) virus-based vector or plasmid sequences.
+>
+> Therefore, only a limited set of taxa are processed by default.
+>
+> Also, NCBI servers will bounce you for too many requests, so be gentle.
 
 ## Why
 
 - The EsViritu database is curated and may be missing key genomes, which can
   cause mis-assignment in the taxonomic profile.
 - Virus-based vectors can cause mis-assignment.
-- Genome reconstructions can be equidistant (by ANI/length) to multiple taxa
-  (often strains of the same species); EsViritu does not currently declare this
-  ambiguity, but it should.
+
 
 `postviritu` reuses EsViritu's quantitative metrics (read counts, RPKMF,
 coverage, Pi, etc.) unchanged and only updates the **taxonomy** columns, adding
@@ -63,7 +66,26 @@ names). Use the same dump for `setup-db` and for later runs.
 
 ## Usage
 
-### 1. Build the search database (once)
+### Run with remote BLASTN (no local DB)
+
+You can also search NCBI's `nt` database remotely through Biopython's QBLAST
+client instead of building a local mmseqs2 database. The input and output
+formats are identical to `postviritu run`; only the search backend changes.
+
+```bash
+postviritu blastn \
+  --input-dir /path/to/esviritu_output \
+  --outdir /path/to/postviritu_output \
+  --taxdump /path/to/ncbi_taxdump_dir \
+  --threads 1
+```
+
+Remote searches are sent in batches of up to **3 query sequences at a time**
+and each batch is awaited before the next is submitted. Use `--batch-size`
+to change this default and `--max-target-seqs` to control how many subject
+hits are reported per query.
+
+### (local mmseqs) 1. Build the search database (once)
 
 ```bash
 postviritu setup-db \
@@ -77,7 +99,7 @@ postviritu setup-db \
 This builds an `mmseqs2` database with taxonomy and writes a
 `postviritu_db.json` manifest into the output directory.
 
-### 2. Run on EsViritu output
+### (local mmseqs) 2. Run on EsViritu output
 
 Batch mode (default) processes every sample prefix found in the input directory:
 
@@ -99,25 +121,6 @@ postviritu run \
   --sample_id AYWM5R.p2126
 ```
 
-### Run with remote BLASTN (no local DB)
-
-You can also search NCBI's `nt` database remotely through Biopython's QBLAST
-client instead of building a local mmseqs2 database. The input and output
-formats are identical to `postviritu run`; only the search backend changes.
-
-```bash
-postviritu blastn \
-  --input-dir /path/to/esviritu_output \
-  --outdir /path/to/postviritu_output \
-  --taxdump /path/to/ncbi_taxdump_dir \
-  --threads 1
-```
-
-Remote searches are sent in batches of up to **3 query sequences at a time**
-and each batch is awaited before the next is submitted. Use `--batch-size`
-to change this default and `--max-target-seqs` to control how many subject
-hits are reported per query.
-
 ### Reassignment modes
 
 - `--mode scratch` (default): re-derive every assembly's taxonomy purely from
@@ -130,13 +133,13 @@ hits are reported per query.
 ### Genotype enrichment (network)
 
 For viral database hits, `postviritu` queries NCBI Virus Variation `vvsearch2`
-by reference accession and uses a non-empty `Genotype` as the subspecies. A
+by reference accession and uses a non-empty `Genotype` or `Lineage` as the subspecies. A
 lookup is only made when the assignment is already a subspecies-level claim,
 that is when it is unambiguous (not an LCA) and the hit identity is at or above
 EsViritu's subspecies threshold. Non-viral hits are never queried, and results
 are cached per accession for the run.
 
-If no genotype is available, the taxdump-derived subspecies is kept. Failed
+If no genotype/lineage is available, the taxdump-derived subspecies is kept. Failed
 requests are retried with backoff and are *not* cached as "no genotype"; after
 repeated consecutive failures the lookups are abandoned for the rest of the run
 and a warning is emitted. Every run prints a tally of what the lookups did, for
@@ -146,13 +149,6 @@ example:
 [postviritu] vvsearch2 genotype lookups: 42 queried, 17 genotyped, 25 without genotype, 0 failed, 0 skipped
 ```
 
-This step is the only part of the pipeline that touches the network, and
-`vvsearch2` is the backend of the NCBI Virus Variation web UI rather than a
-versioned E-utilities endpoint. Because it makes results depend on a live
-service, pass `--no-vvsearch` for a fully offline, deterministic run (for
-example on an air-gapped compute node, or when reproducing an earlier
-analysis). Requests are rate-limited to NCBI's guidance of 3 per second;
-supplying `--vvsearch-email` is recommended for large batches.
 
 ### Key options
 
@@ -246,6 +242,7 @@ Assemblies skipped by `--taxa-filter` retain their original taxonomy and have
 
 ### EsViritu versions
 
+Postviritu only accepts outputs from EsViritu versions v1 or greater.
 Both the pre-1.3 and the EsViritu >= 1.3 output layouts are accepted. For 1.3+,
 consensus headers of the form `{Accession}_{sample}_consensus` are mapped back
 to the info-table Accession. The new `adj_taxonomy` and
