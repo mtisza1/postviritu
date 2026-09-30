@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import warnings
 import zipfile
 from abc import ABC, abstractmethod
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -648,6 +649,10 @@ class BlastnAligner(Aligner):
 
     Results are requested as XML2 (which, unlike XML, carries the target
     taxids) and parsed with :func:`Bio.Blast.parse`.
+
+    Biopython has no QBLAST timeout; it only warns once a request has been
+    polled for 10 minutes. That warning is escalated to an error and the
+    batch is re-submitted (new RID) up to ``max_retries`` times.
     """
 
     def __init__(
@@ -656,11 +661,34 @@ class BlastnAligner(Aligner):
         max_target_seqs: int = 300,
         batch_size: int = 3,
         extra_args: Optional[Dict[str, object]] = None,
+        max_retries: int = 3,
     ):
         self.db = db
         self.max_target_seqs = max_target_seqs
         self.batch_size = batch_size
         self.extra_args = extra_args or {}
+        self.max_retries = max_retries
+
+    def _qblast(self, query: str):
+        """Run one QBLAST request, raising ``BiopythonWarning`` after 10 minutes."""
+        from Bio import Blast, BiopythonWarning
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "error",
+                message=r"BLAST request .* is taking longer than",
+                category=BiopythonWarning,
+            )
+            return Blast.qblast(
+                "blastn",
+                self.db,
+                query,
+                format_type="XML2",
+                hitlist_size=self.max_target_seqs,
+                alignments=self.max_target_seqs,
+                descriptions=self.max_target_seqs,
+                **self.extra_args,
+            )
 
     def search(
         self,
@@ -672,7 +700,7 @@ class BlastnAligner(Aligner):
         result_name: str = "result.m8",
         query_nonN_len: Optional[Dict[str, int]] = None,
     ) -> pl.DataFrame:
-        from Bio import Blast
+        from Bio import BiopythonWarning
 
         if tmp_dir is None:
             tmp_root = tempfile.mkdtemp(prefix="postviritu_blastn_")
@@ -726,20 +754,30 @@ class BlastnAligner(Aligner):
                 batch_started = time.monotonic()
                 try:
                     with open(batch_fasta) as query_handle:
-                        result_stream = Blast.qblast(
-                            "blastn",
-                            self.db,
-                            query_handle.read(),
-                            format_type="XML2",
-                            hitlist_size=self.max_target_seqs,
-                            alignments=self.max_target_seqs,
-                            descriptions=self.max_target_seqs,
-                            **self.extra_args,
-                        )
+                        query = query_handle.read()
+                    attempts = self.max_retries + 1
+                    for attempt in range(1, attempts + 1):
+                        attempt_started = time.monotonic()
                         try:
-                            result = result_stream.read()
-                        finally:
-                            result_stream.close()
+                            result_stream = self._qblast(query)
+                            break
+                        except BiopythonWarning as exc:
+                            if attempt == attempts:
+                                raise
+                            logger.warning(
+                                "BLASTN batch %d/%d: attempt %d/%d timed out after %s (%s); "
+                                "re-submitting",
+                                i + 1,
+                                len(batches),
+                                attempt,
+                                attempts,
+                                _elapsed(attempt_started),
+                                exc,
+                            )
+                    try:
+                        result = result_stream.read()
+                    finally:
+                        result_stream.close()
                 except Exception as exc:
                     logger.error(
                         "BLASTN batch %d/%d failed after %s: %s: %s",

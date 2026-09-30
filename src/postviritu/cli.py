@@ -192,6 +192,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum target sequences reported per query (default: 300).",
     )
     p_blastn.add_argument(
+        "--blast-retries",
+        type=int,
+        default=3,
+        help="Times to re-submit a remote BLASTN batch that is still running "
+        "after 10 minutes (default: 3).",
+    )
+    p_blastn.add_argument(
         "--vvsearch",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -291,6 +298,7 @@ def _cmd_blastn(args: argparse.Namespace) -> int:
         db=args.db,
         max_target_seqs=args.max_target_seqs,
         batch_size=args.batch_size,
+        max_retries=args.blast_retries,
     )
     taxonomy = Taxonomy(
         data_dir=args.taxdump, threads=args.threads, vvsearch=_vvsearch_config(args)

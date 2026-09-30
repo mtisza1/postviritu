@@ -299,6 +299,66 @@ def test_blastn_aligner_logs_failed_batch(tmp_path, monkeypatch, caplog):
     )
 
 
+def _slow_then_ok_qblast(n_slow, calls):
+    import warnings
+
+    from Bio import BiopythonWarning
+
+    def fake_qblast(program, database, query, **kwargs):
+        calls.append(query)
+        if len(calls) <= n_slow:
+            warnings.warn(
+                f"BLAST request RID{len(calls)} is taking longer than 10 minutes, "
+                "consider re-issuing it",
+                BiopythonWarning,
+            )
+            raise AssertionError("the timeout warning must abort the poll loop")
+        names = [line[1:] for line in query.splitlines() if line.startswith(">")]
+        return FakeResult(_identical_hit_zip(names))
+
+    return fake_qblast
+
+
+def test_blastn_aligner_retries_slow_request(tmp_path, monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr("Bio.Blast.qblast", _slow_then_ok_qblast(2, calls))
+    query_fasta = tmp_path / "queries.fasta"
+    write_fasta({"seq0": "ACGT" * 10}, str(query_fasta))
+
+    hits = BlastnAligner(max_retries=2).search(
+        str(query_fasta), tmp_dir=str(tmp_path / "work")
+    )
+
+    assert hits.height == 1
+    assert len(calls) == 3
+    assert len(set(calls)) == 1
+    retries = [r for r in caplog.records if "timed out" in r.getMessage()]
+    assert [r.levelname for r in retries] == ["WARNING", "WARNING"]
+    assert "attempt 1/3" in retries[0].getMessage()
+
+
+def test_blastn_aligner_gives_up_after_retries(tmp_path, monkeypatch, caplog):
+    from Bio import BiopythonWarning
+
+    calls = []
+    monkeypatch.setattr("Bio.Blast.qblast", _slow_then_ok_qblast(10, calls))
+    query_fasta = tmp_path / "queries.fasta"
+    write_fasta({"seq0": "ACGT" * 10}, str(query_fasta))
+
+    try:
+        BlastnAligner(max_retries=1).search(str(query_fasta), tmp_dir=str(tmp_path / "work"))
+    except BiopythonWarning:
+        pass
+    else:
+        raise AssertionError("the timeout must propagate once retries are exhausted")
+
+    assert len(calls) == 2
+    assert any(
+        r.levelname == "ERROR" and "BLASTN batch 1/1 failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 def test_blastn_aligner_keep_writes_result_table(tmp_path, monkeypatch):
     def fake_qblast(program, database, query, **kwargs):
         names = [line[1:] for line in query.splitlines() if line.startswith(">")]
@@ -345,6 +405,7 @@ def test_blastn_subcommand_cli_args():
     assert args.db == "nt"
     assert args.batch_size == 5
     assert args.max_target_seqs == 300
+    assert args.blast_retries == 3
 
 
 def test_blastn_minimum_ani_is_enforced(tmp_path):
