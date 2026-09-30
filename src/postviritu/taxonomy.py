@@ -300,7 +300,7 @@ class Taxonomy:
         params = {
             "fq": 'SeqType_s:("Nucleotide")',
             "q": f"AccVer_s:({terms})",
-            "fl": "AccVer_s,Genotype_s",
+            "fl": "AccVer_s,Genotype_s,Lineage_s",
             "wt": "json",
             "rows": len(accessions),
         }
@@ -324,8 +324,11 @@ class Taxonomy:
                 )
                 response.raise_for_status()
                 docs = response.json()["response"]["docs"]
+                # SARS-CoV-2 records carry only a Pango lineage (Lineage_s);
+                # records with both (e.g. mpox IIb / F.1) keep Genotype_s.
                 found = {
                     doc["AccVer_s"]: _sanitize_genotype(doc.get("Genotype_s"))
+                    or _sanitize_genotype(doc.get("Lineage_s"))
                     for doc in docs
                     if doc.get("AccVer_s")
                 }
