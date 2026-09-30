@@ -24,7 +24,12 @@ from .io_esviritu import (
     write_fasta,
     write_tsv,
 )
-from .outputs import build_assembly_summary, build_tax_profile, rebuild_info
+from .outputs import (
+    build_assembly_summary,
+    build_tax_profile,
+    rebuild_info,
+    thresholded_lineages,
+)
 from .reassign import (
     AssemblyResolution,
     annotate_genotypes,
@@ -228,6 +233,9 @@ def run_sample(
         taxonomy,
         consensus_seqs=included_seqs,
         tie_frac=config.bitscore_tie_frac,
+        proposed_lineages=thresholded_lineages(
+            assembly_summary, resolutions, spthresh, subspthresh
+        ),
     )
 
     # Pass-through files (unchanged) when present.

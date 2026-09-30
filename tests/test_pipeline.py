@@ -72,3 +72,48 @@ def test_run_sample_scratch_with_hit_updates_assembly(
     assert str(row["postviritu_hit_taxid"]) == "999"
     # The assembly that got the hit is recorded; others are unclassified.
     assert row["Assembly"] == assembly
+
+
+def test_report_proposed_taxonomy_matches_thresholded_tax_profile(
+    example_data_dir, example_prefix, tmp_path
+):
+    """Below subspthresh the report must not name a subspecies either."""
+    import html
+    import re
+
+    sample = SamplePaths(prefix=example_prefix, directory=example_data_dir)
+    target_acc = "OR777233.1"
+    hits = make_hits(
+        [
+            {
+                "query": target_acc, "target": "dbhit", "taxid": "999",
+                "pct_identity": 0.93, "aln_length": 33000,
+                "query_length": 33806, "query_coverage": 0.98,
+                "evalue": 1e-99, "bitscore": 6000.0,
+            }
+        ]
+    )
+    taxonomy = FakeTaxonomy(
+        rank_table={
+            "999": {
+                "superkingdom": "Viruses", "family": "Adenoviridae",
+                "genus": "Mastadenovirus", "species": "Reassigned virus sp.",
+                "subspecies": "Reassigned strain X",
+            }
+        }
+    )
+    paths = run_sample(sample, aligner=FakeAligner(hits), taxonomy=taxonomy,
+                       outdir=str(tmp_path / "out"), config=RunConfig(mode="scratch"))
+
+    tax = read_tsv(paths["tax_profile"]).filter(pl.col("species") == "s__Reassigned virus sp.")
+    assert tax["subspecies"].to_list() == ["t__unclassified_Reassigned virus sp."]
+
+    with open(paths["report"]) as report:
+        page = re.search(
+            rf'<section class="query-page"[^>]*data-query="{re.escape(target_acc)}".*?</section>',
+            report.read(),
+            re.S,
+        ).group(0)
+    proposed = html.unescape(page.split("Proposed taxonomy", 1)[1].split("</div>", 1)[0])
+    assert "subspecies</b> unclassified_Reassigned virus sp." in proposed
+    assert "Reassigned strain X" not in proposed

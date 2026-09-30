@@ -145,6 +145,33 @@ def build_assembly_summary(new_info: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def thresholded_lineages(
+    assembly_summary: pl.DataFrame,
+    resolutions: Dict[str, AssemblyResolution],
+    spthresh: float = 0.90,
+    subspthresh: float = 0.95,
+) -> Dict[str, Dict[str, str]]:
+    """Return {Assembly: lineage} after species/subspecies identity thresholding.
+
+    Thresholding uses the new consensus->hit identity (resolution.pct_identity),
+    falling back to the assembly's mean avg_read_identity when no hit identity
+    is available.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for row in assembly_summary.iter_rows(named=True):
+        res = resolutions.get(row["Assembly"])
+        identity = None
+        if res is not None and res.pct_identity is not None:
+            identity = res.pct_identity
+        elif row.get("avg_read_identity") is not None:
+            identity = row["avg_read_identity"]
+        lineage = {r: row[r] for r in TAX_RANKS}
+        out[row["Assembly"]] = apply_identity_thresholds(
+            lineage, identity, spthresh, subspthresh
+        )
+    return out
+
+
 def build_tax_profile(
     new_info: pl.DataFrame,
     resolutions: Dict[str, AssemblyResolution],
@@ -153,28 +180,17 @@ def build_tax_profile(
 ) -> pl.DataFrame:
     """Build the tax_profile, applying identity thresholding per assembly.
 
-    Thresholding uses the new consensus->hit identity (resolution.pct_identity),
-    falling back to the assembly's mean avg_read_identity when no hit identity
-    is available.
+    See :func:`thresholded_lineages` for the identity used.
     """
     filtered_reads = _filtered_reads(new_info)
     assem = build_assembly_summary(new_info)
 
     # Apply per-assembly species/subspecies thresholding to the lineage.
+    lineages = thresholded_lineages(assem, resolutions, spthresh, subspthresh)
     thresholded_rows: List[dict] = []
     for row in assem.iter_rows(named=True):
-        res = resolutions.get(row["Assembly"])
-        identity = None
-        if res is not None and res.pct_identity is not None:
-            identity = res.pct_identity
-        elif row.get("avg_read_identity") is not None:
-            identity = row["avg_read_identity"]
-        lineage = {r: row[r] for r in TAX_RANKS}
-        lineage = apply_identity_thresholds(
-            lineage, identity, spthresh, subspthresh
-        )
         new_row = dict(row)
-        new_row.update(lineage)
+        new_row.update(lineages[row["Assembly"]])
         thresholded_rows.append(new_row)
 
     assem_t = pl.DataFrame(thresholded_rows, schema=assem.schema)
