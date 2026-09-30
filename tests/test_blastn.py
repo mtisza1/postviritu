@@ -53,7 +53,8 @@ def _hit_xml(target, taxid, length, hsps, num=1):
 </Hit>"""
 
 
-def _search_xml(query, query_len, hits, num=1):
+def _search_xml(query, query_len, hits, num=1, message=None):
+    message_xml = f"<message>{escape(message)}</message>" if message else ""
     return f"""<?xml version="1.0"?>
 <BlastXML2 xmlns="http://www.ncbi.nlm.nih.gov" xmlns:xs="http://www.w3.org/2001/XMLSchema-instance" xs:schemaLocation="http://www.ncbi.nlm.nih.gov http://www.ncbi.nlm.nih.gov/data_specs/schema_alt/NCBI_BlastOutput2.xsd">
 <BlastOutput2>
@@ -72,6 +73,7 @@ def _search_xml(query, query_len, hits, num=1):
     <query-title>{escape(query)}</query-title>
     <query-len>{query_len}</query-len>
     <hits>{"".join(hits)}</hits>
+    {message_xml}
   </Search>
   </search>
   </Results>
@@ -355,6 +357,80 @@ def test_blastn_aligner_gives_up_after_retries(tmp_path, monkeypatch, caplog):
     assert len(calls) == 2
     assert any(
         r.levelname == "ERROR" and "BLASTN batch 1/1 failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+_CPU_LIMIT = (
+    "Informational Message: [blastsrv4.REAL]: Error: CPU usage limit was exceeded, "
+    "resulting in SIGXCPU (24).\nNo hits found"
+)
+
+
+def _cpu_limited_qblast(always_fail, calls):
+    """Fake QBLAST: queries in ``always_fail`` always hit the CPU limit; any
+    other query hits it only when searched together with 3+ queries."""
+
+    def fake_qblast(program, database, query, **kwargs):
+        names = [line[1:] for line in query.splitlines() if line.startswith(">")]
+        calls.append(names)
+        searches = []
+        for i, name in enumerate(names, start=1):
+            if name in always_fail or len(names) >= 3:
+                searches.append(_search_xml(name, 40, [], num=i, message=_CPU_LIMIT))
+            else:
+                hit = _hit_xml(f"tgt_{name}", 100, 100, [_hsp_xml("ACGT", "ACGT", 1, 1, 4)])
+                searches.append(_search_xml(name, 4, [hit], num=i))
+        return FakeResult(_qblast_zip(searches))
+
+    return fake_qblast
+
+
+def test_parse_blastn_tolerates_search_messages(tmp_path):
+    path = tmp_path / "msg.xml2.zip"
+    hit = _hit_xml("tgtA", 100, 100, [_hsp_xml("ACGT", "ACGT", 1, 1, 4)])
+    _write_zip(
+        path,
+        [
+            _search_xml("q1", 4, [hit], num=1),
+            _search_xml("q2", 40, [], num=2, message=_CPU_LIMIT),
+        ],
+    )
+
+    hits = parse_blastn(str(path))
+
+    assert hits["query"].to_list() == ["q1"]
+
+
+def test_blastn_aligner_splits_cpu_limited_batches(tmp_path, monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr("Bio.Blast.qblast", _cpu_limited_qblast(set(), calls))
+    query_fasta = tmp_path / "queries.fasta"
+    write_fasta({f"seq{i}": "ACGT" * 10 for i in range(4)}, str(query_fasta))
+
+    hits = BlastnAligner(batch_size=4).search(str(query_fasta), tmp_dir=str(tmp_path / "work"))
+
+    assert sorted(hits["query"].to_list()) == ["seq0", "seq1", "seq2", "seq3"]
+    assert calls == [["seq0", "seq1", "seq2", "seq3"], ["seq0", "seq1"], ["seq2", "seq3"]]
+    assert any(
+        r.levelname == "WARNING" and "CPU usage limit was exceeded for 4/4 queries" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_blastn_aligner_reports_query_that_fails_alone(tmp_path, monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr("Bio.Blast.qblast", _cpu_limited_qblast({"seq1"}, calls))
+    query_fasta = tmp_path / "queries.fasta"
+    write_fasta({"seq0": "ACGT" * 10, "seq1": "ACGT" * 10}, str(query_fasta))
+
+    hits = BlastnAligner(batch_size=2).search(str(query_fasta), tmp_dir=str(tmp_path / "work"))
+
+    assert hits["query"].to_list() == ["seq0"]
+    assert calls == [["seq0", "seq1"], ["seq1"]]
+    assert any(
+        r.levelname == "WARNING"
+        and "seq1 exceeded NCBI's CPU usage limit even when searched alone" in r.getMessage()
         for r in caplog.records
     )
 
