@@ -2,9 +2,9 @@
 
 Defines an :class:`Aligner` interface that aligns query sequences (the EsViritu
 consensus genomes) against a prepared reference database and returns a tidy
-polars DataFrame of hits. The mmseqs2 backend is implemented here; the abstract
-interface allows a BLASTN backend to be added later without refactoring the
-downstream taxonomy/reassignment logic.
+polars DataFrame of hits. Backends: mmseqs2 against a prepared local DB, BLASTN
+via NCBI's remote QBLAST service, and BLASTN via the local BLAST+ command line.
+All share the downstream taxonomy/reassignment logic.
 """
 
 from __future__ import annotations
@@ -453,18 +453,9 @@ def parse_m8(
         pl.col("query").str.replace(r"_consensus$", "").alias("query")
     )
 
-    # Recompute identity/coverage excluding N positions when the aligned
-    # sequences are available (query name must already be the Accession so it
-    # matches the keys of ``query_nonN_len``).
-    if "qaln" in raw.columns and "taln" in raw.columns:
-        raw = _recompute_nonN_metrics(raw, query_nonN_len)
-
-    # Ensure all canonical columns exist (fill missing with nulls).
-    for col, dtype in HIT_SCHEMA.items():
-        if col not in raw.columns:
-            raw = raw.with_columns(pl.lit(None).cast(dtype).alias(col))
-
-    return aggregate_hits(raw.select(HIT_COLUMNS).cast(HIT_SCHEMA, strict=False))
+    # The query name must already be the Accession so it matches the keys of
+    # ``query_nonN_len``.
+    return _finalize_hits(raw, query_nonN_len)
 
 
 def _recompute_nonN_metrics(
@@ -683,7 +674,94 @@ def parse_blastn(
     raw = raw.with_columns(
         pl.col("query").str.replace(r"_consensus$", "").alias("query")
     )
+    return _finalize_hits(raw, query_nonN_len)
 
+
+# BLAST+ tabular fields requested by :class:`LocalBlastnAligner` (must match
+# :func:`parse_blastn_tabular`). ``qseq``/``sseq`` are the gapped aligned
+# sequences, so identity and coverage can be recomputed excluding N positions.
+BLASTN_TABULAR_FIELDS = [
+    "qseqid",
+    "saccver",
+    "staxid",
+    "pident",
+    "length",
+    "qlen",
+    "evalue",
+    "bitscore",
+    "qseq",
+    "sseq",
+    "qstart",
+    "qend",
+    "sstart",
+    "send",
+]
+
+_BLASTN_TABULAR_RENAME = {
+    "qseqid": "query",
+    "saccver": "target",
+    "staxid": "taxid",
+    "pident": "pct_identity",
+    "length": "aln_length",
+    "qlen": "query_length",
+    "qseq": "qaln",
+    "sseq": "taln",
+    "sstart": "tstart",
+    "send": "tend",
+}
+
+
+def parse_blastn_tabular(
+    path: str,
+    query_nonN_len: Optional[Dict[str, int]] = None,
+) -> pl.DataFrame:
+    """Parse BLAST+ ``-outfmt "6 <BLASTN_TABULAR_FIELDS>"`` output.
+
+    ``pident`` is rescaled to a 0-1 fraction and the HSP query coverage is
+    derived from the query coordinates; both are then recomputed to exclude N
+    positions from the aligned sequences, as for the other backends. A target
+    taxid that BLAST reports as ``0`` or ``N/A`` (database built without
+    taxonomy) becomes null, so :func:`filter_hits` drops the hit.
+    """
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return empty_hits()
+
+    raw = pl.read_csv(
+        path,
+        separator="\t",
+        has_header=False,
+        new_columns=BLASTN_TABULAR_FIELDS,
+        infer_schema_length=10000,
+        schema_overrides={"qseqid": pl.Utf8, "saccver": pl.Utf8, "staxid": pl.Utf8},
+        quote_char=None,
+    ).rename(_BLASTN_TABULAR_RENAME)
+
+    raw = raw.with_columns(
+        pl.col("query").str.replace(r"_consensus$", "").alias("query"),
+        pl.when(pl.col("taxid").is_in(["0", "N/A", ""]))
+        .then(None)
+        .otherwise(pl.col("taxid"))
+        .alias("taxid"),
+        (pl.col("pct_identity") / 100.0).alias("pct_identity"),
+        (
+            (pl.col("qend") - pl.col("qstart") + 1) / pl.col("query_length")
+        ).alias("query_coverage"),
+    )
+
+    if raw["taxid"].null_count() == raw.height:
+        logger.warning(
+            "local BLASTN: no hit carries a taxid; was the BLAST database built "
+            "with taxonomy (makeblastdb -parse_seqids -taxid_map ...)? "
+            "Hits without a taxid are discarded."
+        )
+
+    return _finalize_hits(raw, query_nonN_len)
+
+
+def _finalize_hits(
+    raw: pl.DataFrame, query_nonN_len: Optional[Dict[str, int]]
+) -> pl.DataFrame:
+    """Recompute N-aware metrics and coerce ``raw`` to the canonical schema."""
     # Recompute identity/coverage excluding N positions when the aligned
     # sequences are available.
     if "qaln" in raw.columns and "taln" in raw.columns:
@@ -929,6 +1007,110 @@ class BlastnAligner(Aligner):
                     if os.path.isfile(batch_fasta):
                         os.remove(batch_fasta)
             else:
+                shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+class LocalBlastnAligner(Aligner):
+    """BLAST+ ``blastn`` command-line backend against a local BLAST database.
+
+    An alternative to :class:`BlastnAligner` that avoids NCBI's remote QBLAST
+    service (and its rate and CPU limits): all queries are searched in a single
+    local ``blastn`` run. ``db`` is a BLAST database path/name as accepted by
+    ``blastn -db`` (e.g. a downloaded ``core_nt``); it must carry taxonomy
+    (NCBI's pre-built databases do; for custom ones use ``makeblastdb
+    -parse_seqids -taxid_map``) since hits are classified by ``staxid``.
+
+    Excluded taxids are passed to ``-negative_taxids`` (exact taxids, like the
+    remote backend's local filter) so they do not use up ``max_target_seqs``.
+    """
+
+    def __init__(
+        self,
+        db: str,
+        max_target_seqs: int = 300,
+        task: str = "megablast",
+        blastn_bin: str = "blastn",
+        extra_args: Optional[List[str]] = None,
+    ):
+        self.db = db
+        self.max_target_seqs = max_target_seqs
+        self.task = task
+        self.blastn_bin = blastn_bin
+        self.extra_args = extra_args or []
+
+    def search(
+        self,
+        query_fasta: str,
+        threads: int = 1,
+        exclude_taxids: Optional[List[str]] = None,
+        tmp_dir: Optional[str] = None,
+        keep: bool = False,
+        result_name: str = "result.m8",
+        query_nonN_len: Optional[Dict[str, int]] = None,
+    ) -> pl.DataFrame:
+        if shutil.which(self.blastn_bin) is None:
+            raise RuntimeError(
+                f"'{self.blastn_bin}' not found on PATH. Install BLAST+ "
+                "(e.g. `conda install -c bioconda blast`)."
+            )
+        if tmp_dir is None:
+            tmp_root = tempfile.mkdtemp(prefix="postviritu_blastn_")
+        else:
+            tmp_root = tmp_dir
+            os.makedirs(tmp_root, exist_ok=True)
+        result_tsv = os.path.join(tmp_root, result_name)
+        cmd = [
+            self.blastn_bin,
+            "-task",
+            self.task,
+            "-query",
+            query_fasta,
+            "-db",
+            self.db,
+            "-out",
+            result_tsv,
+            "-outfmt",
+            "6 " + " ".join(BLASTN_TABULAR_FIELDS),
+            "-max_target_seqs",
+            str(self.max_target_seqs),
+            "-num_threads",
+            str(threads),
+            *self.extra_args,
+        ]
+        exclude = [str(t) for t in exclude_taxids or []]
+        if exclude:
+            cmd += ["-negative_taxids", ",".join(exclude)]
+        try:
+            logger.info(
+                "local BLASTN (%s): searching %s against %s (%d threads)",
+                self.task,
+                query_fasta,
+                self.db,
+                threads,
+            )
+            started = time.monotonic()
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as exc:
+                logger.error(
+                    "local BLASTN failed after %s with exit code %d",
+                    _elapsed(started),
+                    exc.returncode,
+                )
+                raise
+            hits = parse_blastn_tabular(result_tsv, query_nonN_len)
+            if exclude:
+                hits = hits.filter(~pl.col("taxid").is_in(exclude))
+            logger.info(
+                "local BLASTN: done in %s: %d alignment(s) for %d quer%s",
+                _elapsed(started),
+                hits.height,
+                hits["query"].n_unique(),
+                "y" if hits["query"].n_unique() == 1 else "ies",
+            )
+            return hits
+        finally:
+            if not keep:
                 shutil.rmtree(tmp_root, ignore_errors=True)
 
 
