@@ -1,6 +1,6 @@
 # postviritu
 
-`postviritu` is a Python CLI that post-processes [EsViritu](https://github.com/cmmr/EsViritu) output. It re-aligns EsViritu's reconstructed consensus genomes against a large NCBI nucleotide database (e.g. `core_nt`) using `blastn` (remote query) or `mmseqs2`, (local query), re-derives taxonomy from the NCBI taxonomy (via `taxonkit`), supplements viral subspecies with NCBI Virus Variation genotypes when available, and provides a reviewable HTML report with proposed changes.
+`postviritu` is a Python CLI that post-processes [EsViritu](https://github.com/cmmr/EsViritu) output. It re-aligns EsViritu's reconstructed consensus genomes against a large NCBI nucleotide database (e.g. `core_nt`) using `blastn` (remote or local query) or `mmseqs2` (local query), re-derives taxonomy from the NCBI taxonomy (via `taxonkit`), supplements viral subspecies with NCBI Virus Variation genotypes when available, and provides a reviewable HTML report with proposed changes.
 
 > [!NOTE]
 > It is NOT recommended to use this tool to re-check all EsViritu taxonomy calls.
@@ -30,7 +30,7 @@ conda env create -f environment.yml
 conda activate postviritu
 ```
 
-This installs `mmseqs2`, `taxonkit` + `pytaxonkit` (>= 0.10), `polars`,
+This installs `mmseqs2`, BLAST+ (`blastn`), `taxonkit` + `pytaxonkit` (>= 0.10), `polars`,
 `pandas`, and the `postviritu` CLI. Taxonomy/LCA resolution is done through the
 [`pytaxonkit`](https://github.com/bioforensics/pytaxonkit) library, which wraps
 the `taxonkit` binary.
@@ -84,6 +84,30 @@ Remote searches are sent in batches of up to **3 query sequences at a time**
 and each batch is awaited before the next is submitted. Use `--batch-size`
 to change this default and `--max-target-seqs` to control how many subject
 hits are reported per query.
+
+### Run with local BLASTN (BLAST+ CLI)
+
+Add `--local` to search a local BLAST database with the BLAST+ `blastn`
+command instead of NCBI's remote service. `--db` is then the path/name of the
+local database (as passed to `blastn -db`), e.g. NCBI's pre-built `core_nt`
+fetched with `update_blastdb.pl --decompress core_nt`:
+
+```bash
+postviritu blastn --local \
+  --input-dir /path/to/esviritu_output \
+  --db /path/to/blastdb/core_nt \
+  --outdir /path/to/postviritu_output \
+  --taxdump /path/to/ncbi_taxdump_dir \
+  --threads 16
+```
+
+All queries are searched in one local run (`--batch-size` and
+`--blast-retries` do not apply); `--threads` sets `blastn -num_threads` and
+`--task` selects `megablast` (default), `dc-megablast`, or `blastn`. Hits are
+classified by their `staxid`, so the database must carry taxonomy: NCBI's
+pre-built databases do, and custom ones should be built with
+`makeblastdb -parse_seqids -taxid_map ...`. With `--realign-ties`, excluded
+taxids are passed to `blastn -negative_taxids`.
 
 ### (local mmseqs) 1. Build the search database (once)
 
