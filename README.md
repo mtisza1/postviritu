@@ -62,7 +62,7 @@ should print the SARS-CoV-2 lineage.
 NCBI updates the taxonomy continually, so refresh the dump periodically.
 Otherwise hits to references newer than your dump may resolve to unknown
 taxids, and older dumps use outdated names (e.g. pre-binomial virus species
-names). Use the same dump for `setup-db` and for later runs.
+names). Use the same dump for `setup-mmseqs` and for later runs.
 
 ## Usage
 
@@ -70,7 +70,7 @@ names). Use the same dump for `setup-db` and for later runs.
 
 You can also search NCBI's `nt` database remotely through Biopython's QBLAST
 client instead of building a local mmseqs2 database. The input and output
-formats are identical to `postviritu run`; only the search backend changes.
+formats are identical to `postviritu mmseqs`; only the search backend changes.
 
 ```bash
 postviritu blastn \
@@ -111,8 +111,12 @@ taxids are passed to `blastn -negative_taxids`.
 
 ### (local mmseqs) 1. Build the search database (once)
 
+As of v0.4.0, `postviritu setup-mmseqs` replaces `postviritu setup-db`,
+and `postviritu mmseqs` replaces `postviritu run`. The old subcommands
+are no longer available.
+
 ```bash
-postviritu setup-db \
+postviritu setup-mmseqs \
   --fasta /path/to/core_nt.fasta \
   --taxdump /path/to/ncbi_taxdump_dir \
   --acc2taxid /path/to/nucl_gb.accession2taxid \
@@ -128,7 +132,7 @@ This builds an `mmseqs2` database with taxonomy and writes a
 Batch mode (default) processes every sample prefix found in the input directory:
 
 ```bash
-postviritu run \
+postviritu mmseqs \
   --input-dir /path/to/esviritu_output \
   --db /path/to/postviritu_db \
   --outdir /path/to/postviritu_output \
@@ -138,7 +142,7 @@ postviritu run \
 Single-sample mode:
 
 ```bash
-postviritu run \
+postviritu mmseqs \
   --input-dir /path/to/esviritu_output \
   --db /path/to/postviritu_db \
   --outdir /path/to/postviritu_output \
@@ -196,11 +200,54 @@ assemblies whose original EsViritu taxonomy matches an include-list are
 re-aligned and reassigned; all others are copied through unchanged.
 
 By default the built-in list of high-concern pathogens is used
-(`HIGH_CONCERN_TAXA` in `src/postviritu/taxonomy.py`): e.g. SARS-CoV-2, MERS,
-dengue, Zika, West Nile, chikungunya, mpox, variola, HIV, measles, mumps,
-Lassa, CCHF, Rift Valley fever, the Ebola, Marburg, Henipa, hanta and
-influenza A genera, polioviruses, EV-A71 and EV-D68. Pass `--taxa-filter all`
-to process every assembly, or a YAML file to use your own list.
+(`HIGH_CONCERN_TAXA` in `src/postviritu/taxonomy.py`). This is the complete
+default include-list in copyable YAML format:
+
+```yaml
+species:
+  - "s__betacoronavirus pandemicum"
+  - "s__Orthoflavivirus denguei"
+  - "s__Orthoflavivirus kyasanurense"
+  - "s__Orthoflavivirus nilense"
+  - "s__Orthoflavivirus zikaense"
+  - "s__Alphavirus chikungunya"
+  - "s__Orthobunyavirus oropoucheense"
+  - "s__Orthoflavivirus louisense"
+  - "s__Venezuelan equine encephalitis virus"
+  - "s__Eastern equine encephalitis virus"
+  - "s__Orthoflavivirus flavi"
+  - "s__Middle East respiratory syndrome-related coronavirus"
+  - "s__Orthonairovirus haemorrhagiae"
+  - "s__Mammarenavirus lassaense"
+  - "s__Phlebovirus riftense"
+  - "s__Lentivirus humimdef1"
+  - "s__Lentivirus humimdef2"
+  - "s__Hepacivirus hominis"
+  - "s__Morbillivirus hominis"
+  - "s__Orthorubulavirus parotitidis"
+  - "s__Orthopoxvirus variola"
+  - "s__Orthopoxvirus monkeypox"
+genus:
+  - "g__Ebolavirus"
+  - "g__Orthomarburgvirus"
+  - "g__Henipavirus"
+  - "g__Mammarenavirus"
+  - "g__Orthohantavirus"
+  - "g__Alphavirus"
+  - "g__Alphainfluenzavirus"
+subspecies:
+  - "t__Enterovirus A71"
+  - "t__enterovirus D68"
+  - "t__Poliovirus 1"
+  - "t__Poliovirus 2"
+  - "t__Poliovirus 3"
+  - "t__Human poliovirus 1"
+  - "t__Human poliovirus 2"
+  - "t__Human poliovirus 3"
+```
+
+Copy just the entries you need to a YAML file and pass it via `--taxa-filter`.
+Pass `--taxa-filter all` to process every assembly.
 
 Create a file such as `taxa_to_process.yaml`:
 
@@ -212,10 +259,10 @@ genus:
   - "g__Enterovirus"
 ```
 
-Then pass it to `run` or `blastn`:
+Then pass it to `mmseqs` or `blastn`:
 
 ```bash
-postviritu run \
+postviritu mmseqs \
   --input-dir /path/to/esviritu_output \
   --db /path/to/postviritu_db \
   --outdir /path/to/postviritu_output \

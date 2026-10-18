@@ -1,10 +1,10 @@
 """Command-line interface for postviritu.
 
 Subcommands:
-  setup-db   build the mmseqs2 target DB + taxonomy (run once)
-  run        re-align EsViritu consensus genomes and rewrite outputs
-  blastn     re-align with BLASTN: remote NCBI QBLAST against nt (default), or
-             a local BLAST database with the BLAST+ CLI (--local)
+  setup-mmseqs  build the mmseqs2 target DB + taxonomy (run once)
+  mmseqs       re-align EsViritu consensus genomes with mmseqs2
+  blastn       re-align with BLASTN: remote NCBI QBLAST against nt (default),
+               or a local BLAST database with the BLAST+ CLI (--local)
 """
 
 from __future__ import annotations
@@ -42,9 +42,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # setup-db
+    # setup-mmseqs
     p_db = sub.add_parser(
-        "setup-db", help="Build the mmseqs2 target DB with taxonomy (run once)."
+        "setup-mmseqs", help="Build the mmseqs2 target DB with taxonomy (run once)."
     )
     p_db.add_argument("--fasta", required=True, help="Reference sequence FASTA (e.g. core_nt).")
     p_db.add_argument("--taxdump", required=True, help="NCBI taxdump directory (nodes/names.dmp).")
@@ -56,12 +56,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_db.add_argument("--mmseqs-bin", default="mmseqs")
     p_db.set_defaults(func=_cmd_setup_db)
 
-    # run
+    # mmseqs
     p_run = sub.add_parser(
-        "run", help="Re-align consensus genomes and rewrite EsViritu outputs."
+        "mmseqs",
+        help="Re-align consensus genomes with mmseqs2 and rewrite EsViritu outputs.",
     )
     p_run.add_argument("--input-dir", required=True, help="Directory of EsViritu outputs.")
-    p_run.add_argument("--db", required=True, help="Prepared DB directory from setup-db.")
+    p_run.add_argument("--db", required=True, help="Prepared DB directory from setup-mmseqs.")
     p_run.add_argument("--outdir", required=True, help="Output directory.")
     p_run.add_argument(
         "--sample_id", default=None, help="Process only this sample prefix (default: all)."

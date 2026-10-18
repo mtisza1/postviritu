@@ -1,4 +1,4 @@
-"""Per-sample and batch orchestration for the ``postviritu run`` command."""
+"""Per-sample and batch orchestration for mmseqs2 and BLASTN searches."""
 
 from __future__ import annotations
 
