@@ -1,8 +1,8 @@
 """Build and index the mmseqs2 target database with NCBI taxonomy.
 
-``postviritu setup-db`` runs ``mmseqs createdb`` then ``mmseqs createtaxdb`` so
-the resulting database can emit taxids during search. A small JSON manifest is
-written so ``postviritu run`` can locate the prepared database.
+``postviritu setup-mmseqs`` runs ``mmseqs createdb`` then ``mmseqs createtaxdb``
+so the resulting database can emit taxids during search. A small JSON manifest
+is written so ``postviritu mmseqs`` can locate the prepared database.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def load_manifest(db_dir: str) -> Dict:
     path = manifest_path(db_dir)
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"No '{MANIFEST_NAME}' found in {db_dir}. Run `postviritu setup-db` "
+            f"No '{MANIFEST_NAME}' found in {db_dir}. Run `postviritu setup-mmseqs` "
             "first to build the database."
         )
     with open(path) as fh:

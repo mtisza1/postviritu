@@ -9,6 +9,7 @@ dependencies:
   - pandas>=1.0
   - biopython>=1.87
   - mmseqs2>=15
+  - blast>=2.12
   - taxonkit>=0.15
   - pytaxonkit>=0.10
   - requests>=2.0

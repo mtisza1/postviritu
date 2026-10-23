@@ -1,6 +1,6 @@
 # postviritu
 
-`postviritu` is a Python CLI that post-processes [EsViritu](https://github.com/cmmr/EsViritu) output. It re-aligns EsViritu's reconstructed consensus genomes against a large NCBI nucleotide database (e.g. `core_nt`) using `blastn` (remote query) or `mmseqs2`, (local query), re-derives taxonomy from the NCBI taxonomy (via `taxonkit`), supplements viral subspecies with NCBI Virus Variation genotypes when available, and provides a reviewable HTML report with proposed changes.
+`postviritu` is a Python CLI that post-processes [EsViritu](https://github.com/cmmr/EsViritu) output. It re-aligns EsViritu's reconstructed consensus genomes against a large NCBI nucleotide database (e.g. `core_nt`) using `blastn` (remote or local query) or `mmseqs2` (local query), re-derives taxonomy from the NCBI taxonomy (via `taxonkit`), supplements viral subspecies with NCBI Virus Variation genotypes when available, and provides a reviewable HTML report with proposed changes.
 
 > [!NOTE]
 > It is NOT recommended to use this tool to re-check all EsViritu taxonomy calls.
@@ -30,7 +30,7 @@ conda env create -f environment.yml
 conda activate postviritu
 ```
 
-This installs `mmseqs2`, `taxonkit` + `pytaxonkit` (>= 0.10), `polars`,
+This installs `mmseqs2`, BLAST+ (`blastn`), `taxonkit` + `pytaxonkit` (>= 0.10), `polars`,
 `pandas`, and the `postviritu` CLI. Taxonomy/LCA resolution is done through the
 [`pytaxonkit`](https://github.com/bioforensics/pytaxonkit) library, which wraps
 the `taxonkit` binary.
@@ -62,21 +62,22 @@ should print the SARS-CoV-2 lineage.
 NCBI updates the taxonomy continually, so refresh the dump periodically.
 Otherwise hits to references newer than your dump may resolve to unknown
 taxids, and older dumps use outdated names (e.g. pre-binomial virus species
-names). Use the same dump for `setup-db` and for later runs.
+names). Use the same dump for `setup-mmseqs` and for later runs.
 
 ## Usage
 
 ### Run with remote BLASTN (no local DB)
 
-You can also search NCBI's `nt` database remotely through Biopython's QBLAST
-client instead of building a local mmseqs2 database. The input and output
-formats are identical to `postviritu run`; only the search backend changes.
+You can search NCBI's `nt` or `core_nt` database remotely through Biopython's QBLAST
+client instead of building a local BLAST or mmseqs2 database. The input and output
+formats are identical to `postviritu mmseqs`; only the search backend changes.
 
 ```bash
 postviritu blastn \
   --input-dir /path/to/esviritu_output \
   --outdir /path/to/postviritu_output \
   --taxdump /path/to/ncbi_taxdump_dir \
+  --db core_nt
   --threads 1
 ```
 
@@ -85,10 +86,79 @@ and each batch is awaited before the next is submitted. Use `--batch-size`
 to change this default and `--max-target-seqs` to control how many subject
 hits are reported per query.
 
-### (local mmseqs) 1. Build the search database (once)
+### Run with local BLASTN (BLAST+ CLI)
+
+Add `--local` to search a local BLAST database with the BLAST+ `blastn`
+command instead of NCBI's remote service. `--db` is then the path/name of the
+local database (as passed to `blastn -db`), e.g. NCBI's pre-built `core_nt`
+fetched with `update_blastdb.pl --decompress core_nt`:
 
 ```bash
-postviritu setup-db \
+postviritu blastn --local \
+  --input-dir /path/to/esviritu_output \
+  --db /path/to/blastdb/core_nt \
+  --outdir /path/to/postviritu_output \
+  --taxdump /path/to/ncbi_taxdump_dir \
+  --threads 16
+```
+
+All queries are searched in one local run (`--batch-size` and
+`--blast-retries` do not apply); `--threads` sets `blastn -num_threads` and
+`--task` selects `megablast` (default), `dc-megablast`, or `blastn`. Hits are
+classified by their `staxid`, so the database must carry taxonomy: NCBI's
+pre-built databases do, and custom ones should be built with
+`makeblastdb -parse_seqids -taxid_map ...`. With `--realign-ties`, excluded
+taxids are passed to `blastn -negative_taxids`.
+
+#### Build a custom local BLAST database
+
+If you have an NCBI nucleotide FASTA rather than a pre-built BLAST database,
+build it once with BLAST+ `makeblastdb`. The FASTA headers must start with
+accession IDs that match the taxid map (for example, `>X60725.1 description`).
+First download NCBI's nucleotide accession-to-taxid mapping. This is separate
+from the taxonomy dump described above; `nucl_gb` covers GenBank nucleotide
+accessions, so check that the downloaded mapping covers the accessions in your
+FASTA. NCBI's file has a header and four columns (`accession`,
+`accession.version`, `taxid`, `gi`); `makeblastdb` needs only the versioned
+accession and taxid, tab-separated, without a header:
+
+```bash
+mkdir -p /path/to/ncbi_taxdump_dir
+wget -P /path/to/ncbi_taxdump_dir \
+  https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/accession2taxid/nucl_gb.accession2taxid.gz
+set -o pipefail
+gzip -dc /path/to/ncbi_taxdump_dir/nucl_gb.accession2taxid.gz |
+  awk 'NR>1 {print $2 "\t" $3}' \
+  > /path/to/ncbi_taxdump_dir/accession2taxid.blast.tsv
+
+mkdir -p /path/to/blastdb
+makeblastdb \
+  -in /path/to/nt_viruses.combined.fasta \
+  -dbtype nucl \
+  -parse_seqids \
+  -taxid_map /path/to/ncbi_taxdump_dir/accession2taxid.blast.tsv \
+  -out /path/to/blastdb/nt_viruses
+blastdbcmd -db /path/to/blastdb/nt_viruses -info
+```
+
+If you already have a two-column mapping with a header (for example,
+`accession2taxid.mmseqs_fmt.tsv`), you can use `tail -n +2` to create the
+headerless BLAST map instead of downloading and converting the NCBI file.
+Records without matching taxids will not yield classifiable hits in postviritu.
+Use the database prefix (`/path/to/blastdb/nt_viruses`, not an individual
+volume file) as `--db` in the `postviritu blastn --local` command above. The
+NCBI taxdump is needed for postviritu's taxonomy resolution at run time, not
+for `makeblastdb`. For large FASTA files, allow substantial disk space for
+the compressed download, converted mapping, and BLAST database.
+
+### (local mmseqs) 1. Build the search database (once)
+
+As of v0.4.0, `postviritu setup-mmseqs` replaces `postviritu setup-db`,
+and `postviritu mmseqs` replaces `postviritu run`. The old subcommands
+are no longer available.
+
+```bash
+postviritu setup-mmseqs \
   --fasta /path/to/core_nt.fasta \
   --taxdump /path/to/ncbi_taxdump_dir \
   --acc2taxid /path/to/nucl_gb.accession2taxid \
@@ -104,7 +174,7 @@ This builds an `mmseqs2` database with taxonomy and writes a
 Batch mode (default) processes every sample prefix found in the input directory:
 
 ```bash
-postviritu run \
+postviritu mmseqs \
   --input-dir /path/to/esviritu_output \
   --db /path/to/postviritu_db \
   --outdir /path/to/postviritu_output \
@@ -114,7 +184,7 @@ postviritu run \
 Single-sample mode:
 
 ```bash
-postviritu run \
+postviritu mmseqs \
   --input-dir /path/to/esviritu_output \
   --db /path/to/postviritu_db \
   --outdir /path/to/postviritu_output \
@@ -172,11 +242,54 @@ assemblies whose original EsViritu taxonomy matches an include-list are
 re-aligned and reassigned; all others are copied through unchanged.
 
 By default the built-in list of high-concern pathogens is used
-(`HIGH_CONCERN_TAXA` in `src/postviritu/taxonomy.py`): e.g. SARS-CoV-2, MERS,
-dengue, Zika, West Nile, chikungunya, mpox, variola, HIV, measles, mumps,
-Lassa, CCHF, Rift Valley fever, the Ebola, Marburg, Henipa, hanta and
-influenza A genera, polioviruses, EV-A71 and EV-D68. Pass `--taxa-filter all`
-to process every assembly, or a YAML file to use your own list.
+(`HIGH_CONCERN_TAXA` in `src/postviritu/taxonomy.py`). This is the complete
+default include-list in copyable YAML format:
+
+```yaml
+species:
+  - "s__betacoronavirus pandemicum"
+  - "s__Orthoflavivirus denguei"
+  - "s__Orthoflavivirus kyasanurense"
+  - "s__Orthoflavivirus nilense"
+  - "s__Orthoflavivirus zikaense"
+  - "s__Alphavirus chikungunya"
+  - "s__Orthobunyavirus oropoucheense"
+  - "s__Orthoflavivirus louisense"
+  - "s__Venezuelan equine encephalitis virus"
+  - "s__Eastern equine encephalitis virus"
+  - "s__Orthoflavivirus flavi"
+  - "s__Middle East respiratory syndrome-related coronavirus"
+  - "s__Orthonairovirus haemorrhagiae"
+  - "s__Mammarenavirus lassaense"
+  - "s__Phlebovirus riftense"
+  - "s__Lentivirus humimdef1"
+  - "s__Lentivirus humimdef2"
+  - "s__Hepacivirus hominis"
+  - "s__Morbillivirus hominis"
+  - "s__Orthorubulavirus parotitidis"
+  - "s__Orthopoxvirus variola"
+  - "s__Orthopoxvirus monkeypox"
+genus:
+  - "g__Ebolavirus"
+  - "g__Orthomarburgvirus"
+  - "g__Henipavirus"
+  - "g__Mammarenavirus"
+  - "g__Orthohantavirus"
+  - "g__Alphavirus"
+  - "g__Alphainfluenzavirus"
+subspecies:
+  - "t__Enterovirus A71"
+  - "t__enterovirus D68"
+  - "t__Poliovirus 1"
+  - "t__Poliovirus 2"
+  - "t__Poliovirus 3"
+  - "t__Human poliovirus 1"
+  - "t__Human poliovirus 2"
+  - "t__Human poliovirus 3"
+```
+
+Copy just the entries you need to a YAML file and pass it via `--taxa-filter`.
+Pass `--taxa-filter all` to process every assembly.
 
 Create a file such as `taxa_to_process.yaml`:
 
@@ -188,10 +301,10 @@ genus:
   - "g__Enterovirus"
 ```
 
-Then pass it to `run` or `blastn`:
+Then pass it to `mmseqs` or `blastn`:
 
 ```bash
-postviritu run \
+postviritu mmseqs \
   --input-dir /path/to/esviritu_output \
   --db /path/to/postviritu_db \
   --outdir /path/to/postviritu_output \

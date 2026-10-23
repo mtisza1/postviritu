@@ -1,4 +1,6 @@
 import os
+import re
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -7,7 +9,7 @@ import yaml
 from conftest import FakeAligner, FakeTaxonomy, make_hits
 from postviritu.io_esviritu import SamplePaths, read_tsv, write_fasta
 from postviritu.run import RunConfig, _split_info_by_taxa_filter, run_sample
-from postviritu.taxonomy import TaxaFilter
+from postviritu.taxonomy import HIGH_CONCERN_TAXA, TaxaFilter
 
 
 def _info_row(accession, assembly, species, genus="g__OrigGen"):
@@ -61,6 +63,17 @@ def test_taxa_filter_matches_with_and_without_prefix():
     assert tf.matches({"species": "s__KeepSp"})
     assert tf.matches({"species": "s__Human mastadenovirus A"})
     assert not tf.matches({"species": "s__OtherSp"})
+
+
+def test_readme_default_filter_matches_builtin():
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    match = re.search(
+        r"complete\s+default include-list in copyable YAML format:\s*```yaml\n(.*?)\n```",
+        readme,
+        re.DOTALL,
+    )
+    assert match is not None
+    assert yaml.safe_load(match.group(1)) == HIGH_CONCERN_TAXA
 
 
 def test_taxa_filter_matches_case_insensitive():

@@ -1,9 +1,10 @@
 """Command-line interface for postviritu.
 
 Subcommands:
-  setup-db   build the mmseqs2 target DB + taxonomy (run once)
-  run        re-align EsViritu consensus genomes and rewrite outputs
-  blastn     re-align using Biopython's remote NCBI BLAST against nt
+  setup-mmseqs  build the mmseqs2 target DB + taxonomy (run once)
+  mmseqs       re-align EsViritu consensus genomes with mmseqs2
+  blastn       re-align with BLASTN: remote NCBI QBLAST against nt (default),
+               or a local BLAST database with the BLAST+ CLI (--local)
 """
 
 from __future__ import annotations
@@ -41,9 +42,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # setup-db
+    # setup-mmseqs
     p_db = sub.add_parser(
-        "setup-db", help="Build the mmseqs2 target DB with taxonomy (run once)."
+        "setup-mmseqs", help="Build the mmseqs2 target DB with taxonomy (run once)."
     )
     p_db.add_argument("--fasta", required=True, help="Reference sequence FASTA (e.g. core_nt).")
     p_db.add_argument("--taxdump", required=True, help="NCBI taxdump directory (nodes/names.dmp).")
@@ -55,12 +56,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_db.add_argument("--mmseqs-bin", default="mmseqs")
     p_db.set_defaults(func=_cmd_setup_db)
 
-    # run
+    # mmseqs
     p_run = sub.add_parser(
-        "run", help="Re-align consensus genomes and rewrite EsViritu outputs."
+        "mmseqs",
+        help="Re-align consensus genomes with mmseqs2 and rewrite EsViritu outputs.",
     )
     p_run.add_argument("--input-dir", required=True, help="Directory of EsViritu outputs.")
-    p_run.add_argument("--db", required=True, help="Prepared DB directory from setup-db.")
+    p_run.add_argument("--db", required=True, help="Prepared DB directory from setup-mmseqs.")
     p_run.add_argument("--outdir", required=True, help="Output directory.")
     p_run.add_argument(
         "--sample_id", default=None, help="Process only this sample prefix (default: all)."
@@ -127,7 +129,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # blastn
     p_blastn = sub.add_parser(
         "blastn",
-        help="Re-align consensus genomes using Biopython's remote NCBI BLAST against nt.",
+        help="Re-align consensus genomes with BLASTN: remote NCBI QBLAST against "
+        "nt (default) or a local BLAST database (--local).",
     )
     p_blastn.add_argument(
         "--input-dir", required=True, help="Directory of EsViritu outputs."
@@ -155,7 +158,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_blastn.add_argument("--threads", type=int, default=1)
     p_blastn.add_argument(
-        "--db", default="nt", help="NCBI database name (default: nt)."
+        "--db",
+        default="nt",
+        help="BLAST database: an NCBI database name for remote searches, or a "
+        "local BLAST database path/name with --local (default: nt).",
+    )
+    p_blastn.add_argument(
+        "--local",
+        action="store_true",
+        help="Search a local BLAST database with the BLAST+ blastn CLI instead "
+        "of NCBI's remote QBLAST service. --batch-size and --blast-retries "
+        "do not apply.",
+    )
+    p_blastn.add_argument(
+        "--task",
+        default="megablast",
+        choices=["megablast", "dc-megablast", "blastn"],
+        help="(--local) blastn -task (default: megablast).",
+    )
+    p_blastn.add_argument(
+        "--blastn-bin", default="blastn", help="(--local) blastn executable."
     )
     p_blastn.add_argument(
         "--taxdump",
@@ -180,7 +202,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--batch-size",
         type=int,
         default=3,
-        help="Number of query sequences per remote BLASTN call (default: 3).",
+        help="(remote) Number of query sequences per QBLAST call (default: 3).",
     )
     p_blastn.add_argument(
         "--max-target-seqs",
@@ -192,7 +214,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--blast-retries",
         type=int,
         default=3,
-        help="Times to re-submit a remote BLASTN batch that is still running "
+        help="(remote) Times to re-submit a QBLAST batch that is still running "
         "after 10 minutes (default: 3).",
     )
     p_blastn.add_argument(
@@ -303,16 +325,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_blastn(args: argparse.Namespace) -> int:
-    from .aligner import BlastnAligner
+    from .aligner import BlastnAligner, LocalBlastnAligner
     from .run import RunConfig, run_batch
     from .taxonomy import Taxonomy
 
-    aligner = BlastnAligner(
-        db=args.db,
-        max_target_seqs=args.max_target_seqs,
-        batch_size=args.batch_size,
-        max_retries=args.blast_retries,
-    )
+    if args.local:
+        aligner = LocalBlastnAligner(
+            db=args.db,
+            max_target_seqs=args.max_target_seqs,
+            task=args.task,
+            blastn_bin=args.blastn_bin,
+        )
+    else:
+        aligner = BlastnAligner(
+            db=args.db,
+            max_target_seqs=args.max_target_seqs,
+            batch_size=args.batch_size,
+            max_retries=args.blast_retries,
+        )
     taxonomy = Taxonomy(
         data_dir=args.taxdump, threads=args.threads, vvsearch=_vvsearch_config(args)
     )
