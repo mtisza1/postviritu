@@ -109,6 +109,47 @@ pre-built databases do, and custom ones should be built with
 `makeblastdb -parse_seqids -taxid_map ...`. With `--realign-ties`, excluded
 taxids are passed to `blastn -negative_taxids`.
 
+#### Build a custom local BLAST database
+
+If you have an NCBI nucleotide FASTA rather than a pre-built BLAST database,
+build it once with BLAST+ `makeblastdb`. The FASTA headers must start with
+accession IDs that match the taxid map (for example, `>X60725.1 description`).
+First download NCBI's nucleotide accession-to-taxid mapping. This is separate
+from the taxonomy dump described above; `nucl_gb` covers GenBank nucleotide
+accessions, so check that the downloaded mapping covers the accessions in your
+FASTA. NCBI's file has a header and four columns (`accession`,
+`accession.version`, `taxid`, `gi`); `makeblastdb` needs only the versioned
+accession and taxid, tab-separated, without a header:
+
+```bash
+mkdir -p /path/to/ncbi_taxdump_dir
+wget -P /path/to/ncbi_taxdump_dir \
+  https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/accession2taxid/nucl_gb.accession2taxid.gz
+set -o pipefail
+gzip -dc /path/to/ncbi_taxdump_dir/nucl_gb.accession2taxid.gz |
+  awk 'NR>1 {print $2 "\t" $3}' \
+  > /path/to/ncbi_taxdump_dir/accession2taxid.blast.tsv
+
+mkdir -p /path/to/blastdb
+makeblastdb \
+  -in /path/to/nt_viruses.combined.fasta \
+  -dbtype nucl \
+  -parse_seqids \
+  -taxid_map /path/to/ncbi_taxdump_dir/accession2taxid.blast.tsv \
+  -out /path/to/blastdb/nt_viruses
+blastdbcmd -db /path/to/blastdb/nt_viruses -info
+```
+
+If you already have a two-column mapping with a header (for example,
+`accession2taxid.mmseqs_fmt.tsv`), you can use `tail -n +2` to create the
+headerless BLAST map instead of downloading and converting the NCBI file.
+Records without matching taxids will not yield classifiable hits in postviritu.
+Use the database prefix (`/path/to/blastdb/nt_viruses`, not an individual
+volume file) as `--db` in the `postviritu blastn --local` command above. The
+NCBI taxdump is needed for postviritu's taxonomy resolution at run time, not
+for `makeblastdb`. For large FASTA files, allow substantial disk space for
+the compressed download, converted mapping, and BLAST database.
+
 ### (local mmseqs) 1. Build the search database (once)
 
 As of v0.4.0, `postviritu setup-mmseqs` replaces `postviritu setup-db`,
