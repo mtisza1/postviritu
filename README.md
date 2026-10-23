@@ -68,8 +68,8 @@ names). Use the same dump for `setup-mmseqs` and for later runs.
 
 ### Run with remote BLASTN (no local DB)
 
-You can also search NCBI's `nt` database remotely through Biopython's QBLAST
-client instead of building a local mmseqs2 database. The input and output
+You can search NCBI's `nt` or `core_nt` database remotely through Biopython's QBLAST
+client instead of building a local BLAST or mmseqs2 database. The input and output
 formats are identical to `postviritu mmseqs`; only the search backend changes.
 
 ```bash
@@ -77,6 +77,7 @@ postviritu blastn \
   --input-dir /path/to/esviritu_output \
   --outdir /path/to/postviritu_output \
   --taxdump /path/to/ncbi_taxdump_dir \
+  --db core_nt
   --threads 1
 ```
 
